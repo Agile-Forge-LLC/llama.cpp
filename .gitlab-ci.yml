@@ -1,0 +1,6 @@
+default:
+  tags:
+    - linux
+
+include:
+  - template: Auto-DevOps.gitlab-ci.yml
