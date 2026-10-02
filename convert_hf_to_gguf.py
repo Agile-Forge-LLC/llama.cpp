@@ -25,6 +25,7 @@ from conversion import (
     _mistral_common_installed,
     _mistral_import_error_msg,
 )
+from mtp_shared_embd import validate_mtp_shared_embd
 
 
 def split_str_to_n_bytes(split_str: str) -> int:
@@ -289,6 +290,11 @@ def main() -> None:
         if args.mtp_shared_embd:
             if not args.mtp:
                 logger.error("--mtp-shared-embd only applies together with --mtp")
+                sys.exit(1)
+            try:
+                validate_mtp_shared_embd(gguf.MODEL_ARCH_NAMES[model_class.model_arch])
+            except ValueError as exc:
+                logger.error("%s", exc)
                 sys.exit(1)
             model_class.mtp_shared_embd = True
 
