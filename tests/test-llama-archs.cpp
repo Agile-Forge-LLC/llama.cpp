@@ -569,6 +569,7 @@ static void check_qwen4exp_mtp_bad_metadata(const size_t seed, const float stdev
 
     gguf_context_ptr ffn_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
     gguf_set_val_u32(ffn_ctx.get(), "qwen4exp.feed_forward_length", 0);
+    gguf_set_val_u32(ffn_ctx.get(), "qwen4exp.expert_feed_forward_length", 0);
     model.reset(llama_model_init_from_user(ffn_ctx.get(), set_tensor_data, &tensor_params, model_params));
     if (model) {
         throw std::runtime_error("qwen4exp accepted zero expert feed-forward width");
@@ -586,6 +587,110 @@ static void check_qwen4exp_mtp_bad_metadata(const size_t seed, const float stdev
     model.reset(llama_model_init_from_user(hc_ctx.get(), set_tensor_data, &tensor_params, model_params));
     if (model) {
         throw std::runtime_error("qwen4exp accepted overflowing hyper-connection width");
+    }
+}
+
+static gguf_context_ptr get_qwen4exp_real_hparams_ctx(bool draft, bool shared) {
+    gguf_context_ptr ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, draft ? 1 : 0);
+    const uint32_t n_layer = draft ? 49 : 48;
+    gguf_set_val_u32(ctx.get(), "qwen4exp.block_count", n_layer);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.context_length", 262144);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.embedding_length", 2560);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.head_count", 24);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.head_count_kv", 2);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.key_length", 256);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.value_length", 256);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.rope.dimension_count", 64);
+    gguf_set_val_f32(ctx.get(), "qwen4exp.rope.freq_base", 10000000.0f);
+    gguf_set_val_f32(ctx.get(), "qwen4exp.attention.layer_norm_rms_epsilon", 1e-6f);
+    const int32_t rope_sections[] = { 11, 11, 10, 0 };
+    gguf_set_arr_data(ctx.get(), "qwen4exp.rope.dimension_sections", GGUF_TYPE_INT32, rope_sections, 4);
+    gguf_remove_key(ctx.get(), "qwen4exp.feed_forward_length");
+    gguf_set_val_u32(ctx.get(), "qwen4exp.expert_count", 512);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.expert_used_count", 10);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.expert_feed_forward_length", 640);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.expert_shared_feed_forward_length", 640);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.ssm.conv_kernel", 4);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.ssm.state_size", 128);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.ssm.group_count", 16);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.ssm.time_step_rank", 48);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.ssm.inner_size", 6144);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.full_attention_interval", 4);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.hyper_connection.count", 4);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.hyper_connection.low_rank", 320);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.indexer.head_count", 4);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.indexer.key_length", 128);
+    gguf_set_val_u32(ctx.get(), "qwen4exp.attention.indexer.top_k", 2048);
+    std::vector<int32_t> ratios(n_layer);
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        ratios[il] = il < 48 && il % 4 == 3 ? 4 : 0;
+    }
+    gguf_set_arr_data(ctx.get(), "qwen4exp.attention.compress_ratios", GGUF_TYPE_INT32, ratios.data(), ratios.size());
+
+    if (draft) {
+        for (const char * key : { "qwen4exp.ple.layers", "qwen4exp.ple.ngram_size", "qwen4exp.ple.heads_per_ngram",
+                "qwen4exp.ple.conv_kernel", "qwen4exp.ple.eos_token_id", "qwen4exp.embedding_length_per_layer_input",
+                "qwen4exp.ple.layer_multipliers", "qwen4exp.ple.head_offsets", "qwen4exp.ple.head_vocab_sizes" }) {
+            gguf_remove_key(ctx.get(), key);
+        }
+        if (shared) {
+            gguf_set_val_bool(ctx.get(), "qwen4exp.nextn_shared_target_tensors", true);
+        }
+    } else {
+        const int32_t ple_layers[] = { 1 };
+        const uint64_t multipliers[] = { 23703573157769ULL, 20109073645365ULL, 8052911324071ULL };
+        gguf_set_arr_data(ctx.get(), "qwen4exp.ple.layers", GGUF_TYPE_INT32, ple_layers, 1);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.ple.ngram_size", 3);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.ple.heads_per_ngram", 8);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.ple.conv_kernel", 4);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.ple.eos_token_id", 248044);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.ple.image_token_id", 248056);
+        gguf_set_val_u32(ctx.get(), "qwen4exp.embedding_length_per_layer_input", 160);
+        gguf_set_arr_data(ctx.get(), "qwen4exp.ple.layer_multipliers", GGUF_TYPE_UINT64, multipliers, 3);
+        // The metadata dump shows only the first six PLE ranges; keep the rest valid without allocating their rows.
+        std::vector<uint64_t> offsets(16), sizes(16, 20000003);
+        const uint64_t known_offsets[] = { 0, 20000003, 40000026, 60000059, 80000106, 100000165 };
+        const uint64_t known_sizes[] = { 20000003, 20000023, 20000033, 20000047, 20000059, 20000063 };
+        for (size_t h = 0; h < offsets.size(); ++h) {
+            offsets[h] = h < 6 ? known_offsets[h] : offsets[h - 1] + sizes[h - 1];
+            if (h < 6) {
+                sizes[h] = known_sizes[h];
+            }
+        }
+        gguf_set_arr_data(ctx.get(), "qwen4exp.ple.head_offsets", GGUF_TYPE_UINT64, offsets.data(), offsets.size());
+        gguf_set_arr_data(ctx.get(), "qwen4exp.ple.head_vocab_sizes", GGUF_TYPE_UINT64, sizes.data(), sizes.size());
+    }
+    return ctx;
+}
+
+static void check_qwen4exp_real_hparams_load() {
+    llama_model_params params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    params.devices = devices;
+    params.no_alloc = true;
+    for (int variant = 0; variant < 3; ++variant) {
+        gguf_context_ptr ctx = get_qwen4exp_real_hparams_ctx(variant != 0, variant == 2);
+        params.load_mtp = variant != 0;
+        llama_model_ptr model(llama_model_init_from_user(ctx.get(), nullptr, nullptr, params));
+        if (!model) {
+            throw std::runtime_error("qwen4exp real-hyperparameter fixture " + std::to_string(variant) + " failed to load");
+        }
+        if (model->hparams.n_layer_all != (variant == 0 ? 48u : 49u) ||
+            model->hparams.n_layer_nextn != (variant == 0 ? 0u : 1u) ||
+            model->hparams.n_ff(0) != 0 || model->hparams.n_ff_exp(0) != 640 ||
+            model->hparams.n_head(0) != 24 || model->hparams.n_head_kv(0) != 2 ||
+            (variant != 0 && model->hparams.is_recr(48))) {
+            throw std::runtime_error("qwen4exp real-hyperparameter fixture " + std::to_string(variant) + " did not load its dimensions");
+        }
+    }
+
+    gguf_context_ptr bad = get_qwen4exp_real_hparams_ctx(true, false);
+    std::vector<int32_t> widths(49, 640);
+    widths[48] = 0;
+    gguf_set_arr_data(bad.get(), "qwen4exp.expert_feed_forward_length", GGUF_TYPE_INT32, widths.data(), widths.size());
+    llama_model_ptr model(llama_model_init_from_user(bad.get(), nullptr, nullptr, params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted a NextN block without expert feed-forward width");
     }
 }
 
@@ -1075,6 +1180,8 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
     }, &ud);
 
     if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
+        check_qwen4exp_real_hparams_load();
+        LOG_INF("qwen4exp real-hyperparameter target and both MTP head loads: OK (3 variants); zero-width NextN expert rejected\n");
         check_qwen4exp_mtp_nextn_count(seed, stdev);
         LOG_INF("qwen4exp MTP rejects two NextN layers (block counts 1, 2, 4): OK\n");
         check_qwen4exp_mtp_bad_metadata(seed, stdev);

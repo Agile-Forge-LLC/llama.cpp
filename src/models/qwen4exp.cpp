@@ -61,21 +61,21 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         hparams.n_head() % hparams.n_head_kv() != 0 || hparams.n_rot() > hparams.n_embd_head_k()) {
         throw std::runtime_error("QWEN4EXP has invalid embedding, attention head, or expert dimensions");
     }
+    ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
     for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
-        if (hparams.n_head(il) == 0 || hparams.n_head_kv(il) == 0 || hparams.n_ff(il) == 0 ||
+        if (hparams.n_head(il) == 0 || hparams.n_head_kv(il) == 0 ||
             hparams.n_expert_used(il) == 0 || hparams.n_head(il) != hparams.n_head() ||
             hparams.n_head_kv(il) != hparams.n_head_kv() || hparams.n_expert_used(il) != hparams.n_expert_used() ||
             hparams.n_head(il) % hparams.n_head_kv(il) != 0) {
             throw std::runtime_error(format("QWEN4EXP block %u has invalid attention or expert dimensions", il));
         }
+        if (hparams.n_ff_exp(il) == 0 && hparams.n_ff(il) / hparams.n_expert_used(il) == 0) {
+            throw std::runtime_error(format("QWEN4EXP block %u has no expert feed-forward width", il));
+        }
     }
 
-    ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
-    if (hparams.n_ff_exp() == 0 && hparams.n_ff() / hparams.n_expert_used() == 0) {
-        throw std::runtime_error("QWEN4EXP expert feed-forward width must be greater than zero");
-    }
 
     ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS,    hparams.rope_sections, 4, true);
 
