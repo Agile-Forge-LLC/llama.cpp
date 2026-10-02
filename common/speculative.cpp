@@ -32,8 +32,7 @@ struct mtp_hparams_field_layout {
 static constexpr mtp_hparams_field_layout mtp_hparams_fields[] = { LLAMA_HPARAMS_MTP_FIELDS(MTP_FIELD_LAYOUT) };
 #undef MTP_FIELD_LAYOUT
 
-// Check the declaration-order classification without assuming a fixed ABI size.
-// An unlisted member that fits entirely in padding can still escape this guard.
+// Check layout as a second guard; check-mtp-hparams checks names even within padding.
 static_assert([] {
     size_t end = 0;
     for (const auto & field : mtp_hparams_fields) {

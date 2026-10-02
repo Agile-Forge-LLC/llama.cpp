@@ -53,6 +53,13 @@ endif()
 
 set(TARGET llama-common)
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_target(check-mtp-hparams
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
+    DEPENDS ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
+    VERBATIM
+)
+
 include(parsers/sources.cmake)
 
 add_library(${TARGET}
@@ -126,6 +133,8 @@ add_library(${TARGET}
     jinja/caps.cpp
     jinja/caps.h
     )
+
+add_dependencies(${TARGET} check-mtp-hparams)
 
 set_target_properties(${TARGET} PROPERTIES
     VERSION ${LLAMA_VERSION_BASE}

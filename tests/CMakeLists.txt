@@ -1,5 +1,10 @@
 llama_add_compile_flags()
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME test-mtp-hparams-check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test-mtp-hparams-check.py
+        ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h)
+
 function(llama_build source)
     set(TEST_SOURCES ${source} ${ARGN})
 
