@@ -61,11 +61,21 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         hparams.n_head() % hparams.n_head_kv() != 0 || hparams.n_rot() > hparams.n_embd_head_k()) {
         throw std::runtime_error("QWEN4EXP has invalid embedding, attention head, or expert dimensions");
     }
+    if (hparams.n_rot() % 2 != 0) {
+        throw std::runtime_error(format("%s must be even, got %u", ml.llm_kv(LLM_KV_ROPE_DIMENSION_COUNT).c_str(), hparams.n_rot()));
+    }
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
     for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+        if (hparams.n_head(il) != hparams.n_head() || hparams.n_head_kv(il) != hparams.n_head_kv() ||
+            hparams.n_expert_used(il) != hparams.n_expert_used() ||
+            hparams.n_ff_exp(il) != hparams.n_ff_exp() || hparams.n_ff(il) != hparams.n_ff() ||
+            hparams.n_rot(il) != hparams.n_rot() ||
+            hparams.n_embd_head_k(il) != hparams.n_embd_head_k() ||
+            hparams.n_embd_head_v(il) != hparams.n_embd_head_v()) {
+            throw std::runtime_error(format("QWEN4EXP block %u has inconsistent per-layer dimensions", il));
+        }
         if (hparams.n_head(il) == 0 || hparams.n_head_kv(il) == 0 ||
-            hparams.n_expert_used(il) == 0 || hparams.n_head(il) != hparams.n_head() ||
-            hparams.n_head_kv(il) != hparams.n_head_kv() || hparams.n_expert_used(il) != hparams.n_expert_used() ||
+            hparams.n_expert_used(il) == 0 ||
             hparams.n_head(il) % hparams.n_head_kv(il) != 0) {
             throw std::runtime_error(format("QWEN4EXP block %u has invalid attention or expert dimensions", il));
         }

@@ -113,3 +113,5 @@ private:
 using common_speculative_init_result_ptr = std::unique_ptr<common_speculative_init_result>;
 
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt);
+
+void common_speculative_require_mtp_compatible(const llama_model * model_tgt, const llama_model * model_dft);

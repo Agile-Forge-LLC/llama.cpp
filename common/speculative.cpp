@@ -11,6 +11,7 @@
 #include "sampling.h"
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
+#include "../src/llama-model.h"
 
 #include <algorithm>
 #include <cassert>
@@ -130,7 +131,7 @@ static bool common_speculative_are_compatible(
     return true;
 }
 
-static void common_speculative_require_mtp_compatible(const llama_model * model_tgt, const llama_model * model_dft) {
+void common_speculative_require_mtp_compatible(const llama_model * model_tgt, const llama_model * model_dft) {
     char arch_tgt[64] = {};
     char arch_dft[64] = {};
     llama_model_meta_val_str(model_tgt, "general.architecture", arch_tgt, sizeof(arch_tgt));
@@ -149,6 +150,54 @@ static void common_speculative_require_mtp_compatible(const llama_model * model_
     }
     if (!common_speculative_are_compatible(model_tgt, model_dft, std::strcmp(arch_dft, "qwen4exp") == 0 ? 0 : SPEC_VOCAB_CHECK_START_TOKEN_ID)) {
         throw std::runtime_error("MTP draft and target vocabs are not compatible");
+    }
+    if (std::strcmp(arch_dft, "qwen4exp") != 0 || model_tgt == model_dft) {
+        return;
+    }
+
+    const auto & dft = model_dft->hparams;
+    const auto & tgt = model_tgt->hparams;
+    auto require_equal = [](const char * name, auto draft_value, auto target_value) {
+        if (draft_value != target_value) {
+            throw std::runtime_error(std::string("QWEN4EXP MTP draft and target mismatch: ") + name);
+        }
+    };
+
+    require_equal("n_embd",                  dft.n_embd,                  tgt.n_embd);
+    require_equal("n_embd_out",              dft.n_embd_out(),            tgt.n_embd_out());
+    require_equal("n_embd_head_k",           dft.n_embd_head_k(),         tgt.n_embd_head_k());
+    require_equal("n_embd_head_v",           dft.n_embd_head_v(),         tgt.n_embd_head_v());
+    require_equal("n_rot",                   dft.n_rot(),                 tgt.n_rot());
+    require_equal("rope_sections",           dft.rope_sections,          tgt.rope_sections);
+    require_equal("rope_type",               dft.rope_type,              tgt.rope_type);
+    require_equal("rope_scaling_type",       dft.rope_scaling_type_train, tgt.rope_scaling_type_train);
+    require_equal("rope_freq_base",          dft.rope_freq_base_train,   tgt.rope_freq_base_train);
+    require_equal("rope_freq_scale",         dft.rope_freq_scale_train,  tgt.rope_freq_scale_train);
+    require_equal("rope_attn_factor",        dft.rope_attn_factor,       tgt.rope_attn_factor);
+    require_equal("rope_yarn_log_mul",       dft.rope_yarn_log_mul,      tgt.rope_yarn_log_mul);
+    require_equal("rope_finetuned",          dft.rope_finetuned,         tgt.rope_finetuned);
+    require_equal("n_ctx_orig_yarn",         dft.n_ctx_orig_yarn,        tgt.n_ctx_orig_yarn);
+    require_equal("yarn_ext_factor",         dft.yarn_ext_factor,        tgt.yarn_ext_factor);
+    require_equal("yarn_attn_factor",        dft.yarn_attn_factor,       tgt.yarn_attn_factor);
+    require_equal("yarn_beta_fast",          dft.yarn_beta_fast,         tgt.yarn_beta_fast);
+    require_equal("yarn_beta_slow",          dft.yarn_beta_slow,         tgt.yarn_beta_slow);
+    require_equal("n_expert",                dft.n_expert,              tgt.n_expert);
+    require_equal("n_ff_shexp",              dft.n_ff_shexp,            tgt.n_ff_shexp);
+    require_equal("expert_weights_scale",    dft.expert_weights_scale,  tgt.expert_weights_scale);
+    require_equal("dsv4_hc_mult",            dft.dsv4_hc_mult,          tgt.dsv4_hc_mult);
+    require_equal("hc_low_rank",             dft.hc_low_rank,           tgt.hc_low_rank);
+    require_equal("f_norm_rms_eps",          dft.f_norm_rms_eps,        tgt.f_norm_rms_eps);
+    require_equal("f_attention_scale",       dft.f_attention_scale,     tgt.f_attention_scale);
+
+    for (uint32_t il = 0; il < tgt.n_layer(); ++il) {
+        require_equal("n_head",        dft.n_head(),        tgt.n_head(il));
+        require_equal("n_head_kv",     dft.n_head_kv(),     tgt.n_head_kv(il));
+        require_equal("n_expert_used", dft.n_expert_used(), tgt.n_expert_used(il));
+        require_equal("n_ff_exp",      dft.n_ff_exp(),      tgt.n_ff_exp(il));
+        require_equal("n_ff",          dft.n_ff(),          tgt.n_ff(il));
+        require_equal("n_rot",         dft.n_rot(),         tgt.n_rot(il));
+        require_equal("n_embd_head_k", dft.n_embd_head_k(), tgt.n_embd_head_k(il));
+        require_equal("n_embd_head_v", dft.n_embd_head_v(), tgt.n_embd_head_v(il));
     }
 }
 

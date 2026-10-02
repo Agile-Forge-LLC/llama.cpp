@@ -588,6 +588,27 @@ static void check_qwen4exp_mtp_bad_metadata(const size_t seed, const float stdev
     if (model) {
         throw std::runtime_error("qwen4exp accepted overflowing hyper-connection width");
     }
+
+    gguf_context_ptr odd_rope = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_u32(odd_rope.get(), "qwen4exp.rope.dimension_count", 63);
+    model.reset(llama_model_init_from_user(odd_rope.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted an odd rope dimension count");
+    }
+    gguf_context_ptr odd_target = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+    gguf_set_val_u32(odd_target.get(), "qwen4exp.rope.dimension_count", 63);
+    model.reset(llama_model_init_from_user(odd_target.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted an odd target rope dimension count");
+    }
+
+    gguf_context_ptr widths_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    const int32_t widths[] = { 384, 384, 192 };
+    gguf_set_arr_data(widths_ctx.get(), "qwen4exp.expert_feed_forward_length", GGUF_TYPE_INT32, widths, 3);
+    model.reset(llama_model_init_from_user(widths_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted inconsistent per-layer expert widths");
+    }
 }
 
 static gguf_context_ptr get_qwen4exp_real_hparams_ctx(bool draft, bool shared) {
@@ -668,6 +689,7 @@ static void check_qwen4exp_real_hparams_load() {
     ggml_backend_dev_t devices[] = { nullptr };
     params.devices = devices;
     params.no_alloc = true;
+    llama_model_ptr target;
     for (int variant = 0; variant < 3; ++variant) {
         gguf_context_ptr ctx = get_qwen4exp_real_hparams_ctx(variant != 0, variant == 2);
         params.load_mtp = variant != 0;
@@ -681,6 +703,11 @@ static void check_qwen4exp_real_hparams_load() {
             model->hparams.n_head(0) != 24 || model->hparams.n_head_kv(0) != 2 ||
             (variant != 0 && model->hparams.is_recr(48))) {
             throw std::runtime_error("qwen4exp real-hyperparameter fixture " + std::to_string(variant) + " did not load its dimensions");
+        }
+        if (variant == 0) {
+            target = std::move(model);
+        } else {
+            common_speculative_require_mtp_compatible(target.get(), model.get());
         }
     }
 
@@ -729,7 +756,85 @@ static int save_qwen4exp_mtp_invalid_fixtures(const std::string & dir, size_t se
         const std::string name = n_layer_all == 0 ? "block-zero" : n_layer_all == 3 ? "nextn-recurrent" : "block-oversize";
         saver.save(dir + "/qwen4exp-" + name + ".gguf");
     }
+    for (int variant = 0; variant < 5; ++variant) {
+        llama_model_saver saver(draft.get());
+        saver.add_kv_from_model();
+        saver.add_tensors_from_model();
+        const uint8_t recurrent[] = { 1, 0, 0 };
+        gguf_set_arr_data(saver.gguf_ctx, "qwen4exp.attention.recurrent_layers", GGUF_TYPE_BOOL, recurrent, 3);
+        const char * name = nullptr;
+        switch (variant) {
+            case 0:
+                name = "odd-rope";
+                gguf_set_val_u32(saver.gguf_ctx, "qwen4exp.rope.dimension_count", 63);
+                break;
+            case 1: {
+                name = "expert-widths";
+                const int32_t widths[] = { 384, 384, 192 };
+                gguf_set_arr_data(saver.gguf_ctx, "qwen4exp.expert_feed_forward_length", GGUF_TYPE_INT32, widths, 3);
+            } break;
+            case 2:
+                name = "rope-base";
+                gguf_set_val_f32(saver.gguf_ctx, "qwen4exp.rope.freq_base", 25000.0f);
+                break;
+            case 3: {
+                name = "rope-sections";
+                const int32_t sections[] = { 31, 32, 32, 32 };
+                gguf_set_arr_data(saver.gguf_ctx, "qwen4exp.rope.dimension_sections", GGUF_TYPE_INT32, sections, 4);
+            } break;
+            case 4:
+                name = "norm-eps";
+                gguf_set_val_f32(saver.gguf_ctx, "qwen4exp.attention.layer_norm_rms_epsilon", 1e-4f);
+                break;
+        }
+        saver.save(dir + "/qwen4exp-" + name + ".gguf");
+    }
     return 0;
+}
+
+static void check_qwen4exp_mtp_hparams_mismatch(const size_t seed, const float stdev) {
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices = devices;
+    model_params.load_mtp = true;
+    gguf_context_ptr target_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+    llama_model_ptr target(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
+    if (!target) {
+        throw std::runtime_error("failed to create qwen4exp target for hparam checks");
+    }
+
+    for (int variant = 0; variant < 3; ++variant) {
+        gguf_context_ptr draft_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+        const char * field = nullptr;
+        switch (variant) {
+            case 0:
+                field = "rope_freq_base";
+                gguf_set_val_f32(draft_gguf.get(), "qwen4exp.rope.freq_base", 25000.0f);
+                break;
+            case 1:
+                field = "n_expert";
+                gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_count", 3);
+                break;
+            case 2:
+                field = "f_norm_rms_eps";
+                gguf_set_val_f32(draft_gguf.get(), "qwen4exp.attention.layer_norm_rms_epsilon", 1e-4f);
+                break;
+        }
+        llama_model_ptr draft(llama_model_init_from_user(draft_gguf.get(), set_tensor_data, &tensor_params, model_params));
+        if (!draft) {
+            throw std::runtime_error(std::string("failed to load qwen4exp MTP mismatch fixture: ") + field);
+        }
+        try {
+            common_speculative_require_mtp_compatible(target.get(), draft.get());
+        } catch (const std::runtime_error & err) {
+            if (std::string(err.what()).find(field) != std::string::npos) {
+                continue;
+            }
+            throw;
+        }
+        throw std::runtime_error(std::string("qwen4exp MTP accepted mismatched ") + field);
+    }
 }
 
 struct mtp_test_shapes {
@@ -1181,11 +1286,13 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
 
     if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
         check_qwen4exp_real_hparams_load();
-        LOG_INF("qwen4exp real-hyperparameter target and both MTP head loads: OK (3 variants); zero-width NextN expert rejected\n");
+        LOG_INF("qwen4exp real-hyperparameter target and both MTP head loads and attachment compatibility checks: OK (3 variants); zero-width NextN expert rejected\n");
         check_qwen4exp_mtp_nextn_count(seed, stdev);
         LOG_INF("qwen4exp MTP rejects two NextN layers (block counts 1, 2, 4): OK\n");
         check_qwen4exp_mtp_bad_metadata(seed, stdev);
-        LOG_INF("qwen4exp MTP rejects invalid block count, recurrent NextN, expert/head/FFN dimensions, rope scaling and HC width: OK\n");
+        LOG_INF("qwen4exp MTP rejects invalid block count, recurrent NextN, expert/head/FFN dimensions, rope scaling, odd rope dimensions, per-layer expert widths and HC width: OK\n");
+        check_qwen4exp_mtp_hparams_mismatch(seed, stdev);
+        LOG_INF("qwen4exp MTP rejects target hparam mismatches (rope base, expert count, norm epsilon): OK (3 fields)\n");
         check_qwen4exp_mtp_batch(seed, stdev, false);
         LOG_INF("qwen4exp self-contained MTP verification batch: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, true);
