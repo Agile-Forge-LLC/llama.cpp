@@ -766,6 +766,10 @@ static int save_models(const std::string & arch_filter, const size_t seed, const
 }
 
 static int test_backends(const std::string & arch_filter, const size_t seed, const float stdev, const int verbosity, const char * target_backend) {
+    if (!llm_arch_supports_sm_tensor(LLM_ARCH_QWEN4EXP)) {
+        throw std::runtime_error("qwen4exp must support tensor split");
+    }
+
     struct user_data_t {
         struct {
             ggml_log_callback callback;
