@@ -16,10 +16,35 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <iomanip>
 #include <map>
 #include <cinttypes>
+
+struct mtp_hparams_field_layout {
+    size_t offset;
+    size_t size;
+    size_t align;
+};
+
+#define MTP_FIELD_LAYOUT(field, kind) { offsetof(llama_hparams, field), sizeof(llama_hparams::field), alignof(decltype(llama_hparams::field)) },
+static constexpr mtp_hparams_field_layout mtp_hparams_fields[] = { LLAMA_HPARAMS_MTP_FIELDS(MTP_FIELD_LAYOUT) };
+#undef MTP_FIELD_LAYOUT
+
+// Check the declaration-order classification without assuming a fixed ABI size.
+// An unlisted member that fits entirely in padding can still escape this guard.
+static_assert([] {
+    size_t end = 0;
+    for (const auto & field : mtp_hparams_fields) {
+        const size_t start = (end + field.align - 1) / field.align * field.align;
+        if (field.offset != start) {
+            return false;
+        }
+        end = start + field.size;
+    }
+    return (end + alignof(llama_hparams) - 1) / alignof(llama_hparams) * alignof(llama_hparams) == sizeof(llama_hparams);
+}(), "classify every new llama_hparams field for MTP attachment");
 
 #define SPC_DBG(fmt, ...) LOG_DBG("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
 #define SPC_TRC(fmt, ...) LOG_TRC("spec %12.*s: " fmt, 12, __func__, __VA_ARGS__)
@@ -141,6 +166,9 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
         (std::strcmp(arch_tgt, arch_dft) != 0 || llama_model_n_embd(model_tgt) != llama_model_n_embd(model_dft))) {
         throw std::runtime_error("QWEN4EXP MTP draft and target must have matching architecture and hidden size");
     }
+    if (std::strcmp(arch_dft, "qwen4exp") == 0 && model_dft != model_tgt && model_dft->mtp_validated_target == model_tgt) {
+        return;
+    }
     if (llama_model_n_embd_out(model_tgt) != llama_model_n_embd_out(model_dft)) {
         throw std::runtime_error("MTP input row width must match the target h_nextn width");
     }
@@ -157,8 +185,6 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
 
     const auto & dft = model_dft->hparams;
     const auto & tgt = model_tgt->hparams;
-    // Classify new llama_hparams members here before changing this size guard.
-    static_assert(sizeof(llama_hparams) == 36096, "classify new MTP hparams fields as compared or allowlisted");
     auto require_equal = [](const char * name, auto draft_value, auto target_value) {
         if (draft_value != target_value) {
             throw std::runtime_error(std::string("QWEN4EXP MTP draft and target mismatch: ") + name);
@@ -173,181 +199,20 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
     // is_ple_impl, ple_layer_multipliers, ple_head_offsets and ple_head_vocab_sizes describe trunk-only PLE layers and hashes.
     // rope_pattern, is_swa_impl, is_recr_impl, is_indexer_full_impl and dsv4_compress_ratios describe trunk layer patterns; the NextN block runs dense attention.
     // Per-layer array entries outside the mapped NextN and target trunk layers do not run in this attachment.
-#define MTP_EQUAL(field) require_equal(#field, dft.field, tgt.field)
-    MTP_EQUAL(vocab_only);
-    MTP_EQUAL(rope_finetuned);
-    MTP_EQUAL(use_par_res);
-    MTP_EQUAL(swin_norm);
-    MTP_EQUAL(norm_before_residual);
-    MTP_EQUAL(norm_before_fc);
-    MTP_EQUAL(n_ctx_train);
-    MTP_EQUAL(n_embd);
-    MTP_EQUAL(router_layer);
-    MTP_EQUAL(n_expert);
-    MTP_EQUAL(n_rel_attn_bkts);
-    MTP_EQUAL(n_layer_kv_from_start);
-    MTP_EQUAL(n_embd_head_k_full);
-    MTP_EQUAL(n_embd_head_v_full);
-    MTP_EQUAL(n_embd_head_k_swa);
-    MTP_EQUAL(n_embd_head_v_swa);
-    MTP_EQUAL(n_rot_full);
-    MTP_EQUAL(n_rot_swa);
-    MTP_EQUAL(n_embd_head_k_mla_impl);
-    MTP_EQUAL(n_embd_head_v_mla_impl);
-    require_equal("posnet.n_embd",  dft.posnet.n_embd,  tgt.posnet.n_embd);
-    require_equal("posnet.n_layer", dft.posnet.n_layer, tgt.posnet.n_layer);
-    require_equal("convnext.n_embd",  dft.convnext.n_embd,  tgt.convnext.n_embd);
-    require_equal("convnext.n_layer", dft.convnext.n_layer, tgt.convnext.n_layer);
-    MTP_EQUAL(n_shortconv_l_cache);
-    MTP_EQUAL(n_layer_dense_lead);
-    MTP_EQUAL(n_lora_q);
-    MTP_EQUAL(n_lora_kv);
-    MTP_EQUAL(n_ff_shexp);
-    MTP_EQUAL(n_ff_chexp);
-    MTP_EQUAL(n_expert_shared);
-    MTP_EQUAL(n_norm_groups);
-    MTP_EQUAL(n_expert_groups);
-    MTP_EQUAL(n_group_used);
-    MTP_EQUAL(n_group_experts);
-    MTP_EQUAL(n_lora_kv_swa);
-    MTP_EQUAL(n_embd_head_k_mla_swa);
-    MTP_EQUAL(n_embd_head_v_mla_swa);
-    MTP_EQUAL(expert_group_scale);
-    MTP_EQUAL(expert_weights_scale);
-    MTP_EQUAL(expert_weights_norm);
-    MTP_EQUAL(expert_gating_func);
-    MTP_EQUAL(moe_every_n_layers);
-    MTP_EQUAL(moe_latent_size);
-    MTP_EQUAL(f_norm_eps);
-    MTP_EQUAL(f_norm_rms_eps);
-    MTP_EQUAL(f_norm_group_eps);
-    MTP_EQUAL(f_attn_logit_softcapping);
-    MTP_EQUAL(f_router_logit_softcapping);
-    MTP_EQUAL(f_final_logit_softcapping);
-    MTP_EQUAL(rescale_every_n_layers);
-    MTP_EQUAL(time_mix_extra_dim);
-    MTP_EQUAL(time_decay_extra_dim);
-    MTP_EQUAL(wkv_head_size);
-    MTP_EQUAL(token_shift_count);
-    MTP_EQUAL(n_lora_decay);
-    MTP_EQUAL(n_lora_iclr);
-    MTP_EQUAL(n_lora_value_res_mix);
-    MTP_EQUAL(n_lora_gate);
-    MTP_EQUAL(rope_attn_factor);
-    MTP_EQUAL(rope_freq_base_train);
-    MTP_EQUAL(rope_freq_base_train_swa);
-    MTP_EQUAL(rope_freq_scale_train);
-    MTP_EQUAL(rope_freq_scale_train_swa);
-    MTP_EQUAL(rope_scaling_alpha);
-    MTP_EQUAL(n_ctx_orig_yarn);
-    MTP_EQUAL(rope_yarn_log_mul);
-    MTP_EQUAL(yarn_ext_factor);
-    MTP_EQUAL(yarn_attn_factor);
-    MTP_EQUAL(yarn_beta_fast);
-    MTP_EQUAL(yarn_beta_slow);
-    MTP_EQUAL(rope_sections);
-    MTP_EQUAL(swa_type);
-    MTP_EQUAL(n_swa);
-    MTP_EQUAL(non_causal_type);
-    MTP_EQUAL(ssm_d_conv);
-    MTP_EQUAL(ssm_d_inner);
-    MTP_EQUAL(ssm_d_state);
-    MTP_EQUAL(ssm_dt_rank);
-    MTP_EQUAL(ssm_n_group);
-    MTP_EQUAL(n_embd_head_la);
-    MTP_EQUAL(n_embd_head_kda);
-    MTP_EQUAL(kda_safe_gate);
-    MTP_EQUAL(n_expert_latent);
-    MTP_EQUAL(attn_res_block_size);
-    MTP_EQUAL(kda_gate_lower_bound);
-    MTP_EQUAL(situ_beta);
-    MTP_EQUAL(situ_linear_beta);
-    MTP_EQUAL(n_hrm_layers_per_stack);
-    MTP_EQUAL(n_hrm_h_cycles);
-    MTP_EQUAL(n_hrm_l_cycles);
-    MTP_EQUAL(hrm_prefix_lm);
-    MTP_EQUAL(ssm_dt_b_c_rms);
-    MTP_EQUAL(f_clamp_kqv);
-    MTP_EQUAL(f_max_alibi_bias);
-    MTP_EQUAL(f_logit_scale);
-    MTP_EQUAL(f_residual_scale);
-    MTP_EQUAL(f_embedding_scale);
-    MTP_EQUAL(f_attention_scale);
-    MTP_EQUAL(f_attn_out_scale);
-    MTP_EQUAL(attn_temp_length);
-    MTP_EQUAL(f_attn_value_scale);
-    MTP_EQUAL(causal_attn);
-    MTP_EQUAL(use_alibi);
-    MTP_EQUAL(attn_soft_cap);
-    MTP_EQUAL(use_kq_norm);
-    MTP_EQUAL(n_cls_out);
-    MTP_EQUAL(n_embd_inp_impl);
-    MTP_EQUAL(n_embd_inp_enc_impl);
-    MTP_EQUAL(n_embd_out_impl);
-    MTP_EQUAL(dflash_block_size);
-    MTP_EQUAL(dflash_conv_kernel_size);
-    MTP_EQUAL(dflash_conv_group_size);
-    MTP_EQUAL(dflash_selector_rank);
-    MTP_EQUAL(dflash_selector_top_k);
-    MTP_EQUAL(n_moe_layer_step);
-    MTP_EQUAL(n_no_rope_layer_step);
-    MTP_EQUAL(n_attn_temp_floor_scale);
-    MTP_EQUAL(f_attn_temp_scale);
-    MTP_EQUAL(f_attn_temp_offset);
-    MTP_EQUAL(n_altup);
-    MTP_EQUAL(i_altup_act);
-    MTP_EQUAL(laurel_rank);
-    MTP_EQUAL(n_embd_altup);
-    MTP_EQUAL(dense_2_feat_in);
-    MTP_EQUAL(dense_2_feat_out);
-    MTP_EQUAL(dense_3_feat_in);
-    MTP_EQUAL(dense_3_feat_out);
-    MTP_EQUAL(indexer_n_head);
-    MTP_EQUAL(indexer_head_size);
-    MTP_EQUAL(indexer_top_k);
-    MTP_EQUAL(indexer_kpool);
-    MTP_EQUAL(indexer_kpool_select_tail);
-    MTP_EQUAL(indexer_kpool_row);
-    MTP_EQUAL(indexer_kpool_by_order);
-    MTP_EQUAL(indexer_block_size);
-    MTP_EQUAL(indexer_local_blocks);
-    MTP_EQUAL(dsv4_o_group_count);
-    MTP_EQUAL(dsv4_o_lora_rank);
-    MTP_EQUAL(dsv4_hc_mult);
-    MTP_EQUAL(dsv4_hc_sinkhorn_iters);
-    MTP_EQUAL(dsv4_hash_layer_count);
-    MTP_EQUAL(dsv4_compress_rope_base);
-    MTP_EQUAL(dsv4_hc_eps);
-    MTP_EQUAL(hc_low_rank);
-    MTP_EQUAL(hc_magnitude);
-    MTP_EQUAL(n_deepstack_layers);
-    MTP_EQUAL(dec_start_token_id);
-    MTP_EQUAL(dec_n_layer);
-    MTP_EQUAL(pooling_type);
-    MTP_EQUAL(pooling_type_cls);
-    MTP_EQUAL(rope_type);
-    MTP_EQUAL(rope_scaling_type_train);
-    MTP_EQUAL(llm_ffn_op);
-
-    for (uint32_t il = 0; il < tgt.n_layer(); ++il) {
-        const uint32_t nextn = dft.n_layer();
-#define MTP_LAYER_EQUAL(field) require_equal(#field, dft.field[nextn], tgt.field[il])
-        MTP_LAYER_EQUAL(n_head_arr);
-        MTP_LAYER_EQUAL(n_head_kv_arr);
-        MTP_LAYER_EQUAL(n_ff_arr);
-        MTP_LAYER_EQUAL(n_ff_exp_arr);
-        MTP_LAYER_EQUAL(n_expert_used_arr);
-        MTP_LAYER_EQUAL(xielu_alpha_n);
-        MTP_LAYER_EQUAL(xielu_alpha_p);
-        MTP_LAYER_EQUAL(xielu_beta);
-        MTP_LAYER_EQUAL(xielu_eps);
-        MTP_LAYER_EQUAL(deepstack_mapping_arr);
-        MTP_LAYER_EQUAL(swiglu_clamp_exp);
-        MTP_LAYER_EQUAL(swiglu_clamp_shexp);
-#undef MTP_LAYER_EQUAL
-    }
-#undef MTP_EQUAL
+    const uint32_t nextn = dft.n_layer();
+#define MTP_CHECK_EQUAL(field) require_equal(#field, dft.field, tgt.field);
+#define MTP_CHECK_ALLOW(field)
+#define MTP_CHECK_NESTED(field) require_equal(#field ".n_embd", dft.field.n_embd, tgt.field.n_embd); require_equal(#field ".n_layer", dft.field.n_layer, tgt.field.n_layer);
+#define MTP_CHECK_LAYER(field) for (uint32_t il = 0; il < tgt.n_layer(); ++il) { require_equal(#field, dft.field[nextn], tgt.field[il]); }
+#define MTP_CHECK(field, kind) MTP_CHECK_##kind(field)
+    LLAMA_HPARAMS_MTP_FIELDS(MTP_CHECK)
+#undef MTP_CHECK
+#undef MTP_CHECK_LAYER
+#undef MTP_CHECK_NESTED
+#undef MTP_CHECK_ALLOW
+#undef MTP_CHECK_EQUAL
     require_equal("n_embd_out", dft.n_embd_out(), tgt.n_embd_out());
+    model_dft->mtp_validated_target = model_tgt;
 }
 
 using common_speculative_draft_params_vec = std::vector<common_speculative_draft_params>;

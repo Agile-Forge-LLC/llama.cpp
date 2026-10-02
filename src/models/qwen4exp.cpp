@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cinttypes>
-#include <cstring>
 
 // bad metadata must be catchable: GGML_ASSERT aborts the whole process
 static void qwen4exp_require_nonzero(const llama_model_loader & ml, llm_kv kid, uint32_t value) {
@@ -30,18 +29,8 @@ static const llama_model & qwen4exp_shared_model(const llama_cparams & cparams, 
                                         "load it as a draft of its target model (-md), not on its own", name));
     }
     const llama_model & other = *llama_get_model(cparams.ctx_other);
-    if (other.arch != LLM_ARCH_QWEN4EXP || other.hparams.n_embd != model.hparams.n_embd ||
-        other.hparams.n_embd_out() != model.hparams.n_embd_out()) {
-        throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require a qwen4exp target with matching hidden size");
-    }
-    if (other.vocab.n_tokens() != model.vocab.n_tokens() || other.vocab.get_type() != model.vocab.get_type() ||
-        other.vocab.token_bos() != model.vocab.token_bos() || other.vocab.token_eos() != model.vocab.token_eos()) {
-        throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require a matching target vocab");
-    }
-    for (uint32_t id = 0; id < model.vocab.n_tokens(); ++id) {
-        if (std::strcmp(other.vocab.token_get_text(id), model.vocab.token_get_text(id)) != 0) {
-            throw std::runtime_error(format("QWEN4EXP MTP: borrowed tensors require a matching target vocab (token %u differs)", id));
-        }
+    if (model.mtp_validated_target != &other) {
+        throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require attachment validation against this target");
     }
     return other;
 }
