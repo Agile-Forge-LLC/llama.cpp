@@ -12,6 +12,7 @@
 #include "../src/llama-arch.h"
 #include "../src/llama-model-saver.h"
 #include "../src/llama-model.h"
+#include "../src/llama-context.h"
 #include "../src/llama-ext.h"
 
 #include <cinttypes>
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <random>
 #include <regex>
@@ -927,6 +929,7 @@ static void check_qwen4exp_mtp_batch(const size_t seed, const float stdev, bool 
 
     llama_model_ptr target;
     llama_context_ptr target_ctx;
+    bool rejected = false;
     if (shared) {
         gguf_context_ptr target_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
         target.reset(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
@@ -948,9 +951,10 @@ static void check_qwen4exp_mtp_batch(const size_t seed, const float stdev, bool 
                 if (std::string(err.what()).find("vocab") == std::string::npos) {
                     throw;
                 }
+                rejected = true;
             }
-            if (model->mtp_validated_target) {
-                throw std::runtime_error("qwen4exp validated a mismatched shared MTP vocabulary");
+            if (!rejected) {
+                throw std::runtime_error("qwen4exp accepted a mismatched shared MTP vocabulary");
             }
         } else {
             common_speculative_require_mtp_compatible(target.get(), model.get());
@@ -982,7 +986,8 @@ static void check_qwen4exp_mtp_batch(const size_t seed, const float stdev, bool 
         }
         return true;
     };
-    llama_context_ptr ctx(llama_init_from_model(model.get(), ctx_params));
+    llama_context_ptr ctx(shared && !mismatched ? llama_init_from_model_mtp(model.get(), ctx_params, target.get()) :
+        llama_init_from_model(model.get(), ctx_params));
     if (mismatched) {
         if (ctx) {
             throw std::runtime_error("qwen4exp borrowed weights without attachment validation");
@@ -1084,11 +1089,42 @@ static void check_qwen4exp_mtp_file_shared(const size_t seed, const float stdev)
         throw std::runtime_error("shared MTP file borrowed weights before validation");
     }
     common_speculative_require_mtp_compatible(target.get(), draft.get());
-    llama_context_ptr ctx(llama_init_from_model(draft.get(), ctx_params));
-    if (!ctx) {
-        throw std::runtime_error("failed to reserve file-backed shared MTP context");
+    tensor_data_params other_tensor_params = { seed + 1, stdev };
+    llama_model_ptr other_target(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &other_tensor_params, model_params));
+    llama_context_params other_params = ctx_params;
+    other_params.ctx_type = LLAMA_CONTEXT_TYPE_DEFAULT;
+    other_params.ctx_other = nullptr;
+    llama_context_ptr other_target_ctx(other_target ? llama_init_from_model(other_target.get(), other_params) : nullptr);
+    if (!other_target_ctx || other_target->tok_embd == target->tok_embd || other_target->output == target->output) {
+        throw std::runtime_error("failed to create distinct shared MTP target weights");
+    }
+    std::vector<uint8_t> zero_head(ggml_nbytes(other_target->output), 0);
+    ggml_backend_tensor_set(other_target->output, zero_head.data(), 0, zero_head.size());
+    common_speculative_require_mtp_compatible(other_target.get(), draft.get());
+    other_params = ctx_params;
+    other_params.ctx_other = other_target_ctx.get();
+    other_params.cb_eval = nullptr;
+    other_params.cb_eval_user_data = nullptr;
+    if (llama_context_ptr wrong_target(llama_init_from_model_mtp(draft.get(), other_params, target.get())); wrong_target) {
+        throw std::runtime_error("shared MTP context accepted a target other than ctx_other");
+    }
+    auto create_first = std::async(std::launch::async, [&] {
+        return llama_context_ptr(llama_init_from_model_mtp(draft.get(), ctx_params, target.get()));
+    });
+    auto create_second = std::async(std::launch::async, [&] {
+        return llama_context_ptr(llama_init_from_model_mtp(draft.get(), other_params, other_target.get()));
+    });
+    llama_context_ptr ctx = create_first.get();
+    llama_context_ptr other_ctx = create_second.get();
+    if (!other_ctx || other_ctx->get_mtp_validated_target() != other_target.get() ||
+        !ctx || ctx->get_mtp_validated_target() != target.get()) {
+        throw std::runtime_error("shared MTP contexts did not bind to their own targets");
+    }
+    if (llama_context_ptr unvalidated(llama_init_from_model(draft.get(), other_params)); unvalidated) {
+        throw std::runtime_error("shared MTP file borrowed weights from another validated context");
     }
     llama_set_embeddings_nextn(ctx.get(), true, true);
+    llama_set_embeddings_nextn(other_ctx.get(), true, true);
 
     // Graph builds must not re-read token text after the attachment check.
     auto & token = const_cast<llama_vocab::token_data &>(draft->vocab.get_token_data(5));
@@ -1110,6 +1146,29 @@ static void check_qwen4exp_mtp_file_shared(const size_t seed, const float stdev)
         }
     }
     token.text = original;
+
+    auto decode_one = [&](llama_context * draft_ctx, int pos) {
+        common_batch batch(draft_ctx);
+        const int idx = batch.add(5, pos, 0, true);
+        batch.set_embd(idx, { hidden.data(), 1, (size_t) llama_model_n_embd_out(draft.get()) });
+        if (llama_process(draft_ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0 || !llama_get_logits_ith(draft_ctx, 0)) {
+            throw std::runtime_error("shared MTP context failed to decode with its target");
+        }
+        const float * logits = llama_get_logits_ith(draft_ctx, 0);
+        return std::vector<float>(logits, logits + llama_vocab_n_tokens(llama_model_get_vocab(draft.get())));
+    };
+    const auto first_logits = decode_one(other_ctx.get(), 0);
+    const auto second_logits = decode_one(ctx.get(), 8);
+    bool nonzero = false;
+    for (size_t i = 0; i < first_logits.size(); ++i) {
+        if (first_logits[i] != 0.0f) {
+            throw std::runtime_error("shared MTP context did not borrow its zeroed target head");
+        }
+        nonzero |= second_logits[i] != 0.0f;
+    }
+    if (!nonzero) {
+        throw std::runtime_error("shared MTP context lost its nonzero target head");
+    }
 }
 
 static void check_qwen4exp_mtp_reject_mismatch(const size_t seed, const float stdev, int mismatch) {
@@ -1475,7 +1534,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
         check_qwen4exp_mtp_batch(seed, stdev, true);
         LOG_INF("qwen4exp shared MTP verification batch: OK\n");
         check_qwen4exp_mtp_file_shared(seed, stdev);
-        LOG_INF("qwen4exp file-backed shared MTP verification (2 batches, 4 tokens, 2 outputs) and no graph-build vocab scan: OK\n");
+        LOG_INF("qwen4exp file-backed shared MTP verification (2 batches, 4 tokens, 2 outputs), two target contexts with one draft model, unvalidated borrow rejected, and no graph-build vocab scan: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, true, true);
         LOG_INF("qwen4exp shared MTP rejects mismatched vocabulary: OK\n");
         check_qwen4exp_mtp_reject_mismatch(seed, stdev, 0);

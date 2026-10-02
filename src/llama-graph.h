@@ -18,6 +18,7 @@ struct ggml_context;
 struct ggml_tensor;
 
 struct llama_cparams;
+struct llama_model;
 struct llama_layer;
 struct llama_prec_policy;
 
@@ -789,6 +790,7 @@ struct llm_graph_params {
     const llama_cross            * cross;
 
     const llama_prec_policy * prec_policy = nullptr;
+    const llama_model * mtp_validated_target = nullptr;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
 

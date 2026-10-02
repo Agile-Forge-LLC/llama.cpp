@@ -642,10 +642,6 @@ struct llama_model {
     llama_hparams hparams = {};
     llama_vocab   vocab;
 
-    // Set by MTP attachment validation before a qwen4exp draft can borrow target weights.
-    // Models and vocabularies must remain unchanged while attached.
-    mutable const llama_model * mtp_validated_target = nullptr;
-
     // per-tensor activation precision policy
     llama_prec_policy prec_policy;
 

@@ -12,6 +12,7 @@
 
 #include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn / llama_get_embeddings_nextn_ith (used by MTP)
 #include "../src/llama-model.h"
+#include "../src/llama-context.h"
 
 #include <algorithm>
 #include <cassert>
@@ -165,9 +166,6 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
         (std::strcmp(arch_tgt, arch_dft) != 0 || llama_model_n_embd(model_tgt) != llama_model_n_embd(model_dft))) {
         throw std::runtime_error("QWEN4EXP MTP draft and target must have matching architecture and hidden size");
     }
-    if (std::strcmp(arch_dft, "qwen4exp") == 0 && model_dft != model_tgt && model_dft->mtp_validated_target == model_tgt) {
-        return;
-    }
     if (llama_model_n_embd_out(model_tgt) != llama_model_n_embd_out(model_dft)) {
         throw std::runtime_error("MTP input row width must match the target h_nextn width");
     }
@@ -211,7 +209,6 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
 #undef MTP_CHECK_ALLOW
 #undef MTP_CHECK_EQUAL
     require_equal("n_embd_out", dft.n_embd_out(), tgt.n_embd_out());
-    model_dft->mtp_validated_target = model_tgt;
 }
 
 using common_speculative_draft_params_vec = std::vector<common_speculative_draft_params>;
@@ -1459,7 +1456,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         const llama_model * model_tgt = llama_get_model(ctx_tgt);
         const llama_model * model_dft = llama_get_model(ctx_dft);
-        common_speculative_require_mtp_compatible(model_tgt, model_dft);
+        if (ctx_dft->get_mtp_validated_target() != model_tgt) {
+            common_speculative_require_mtp_compatible(model_tgt, model_dft);
+        }
         char arch[64] = {};
         llama_model_meta_val_str(model_dft, "general.architecture", arch, sizeof(arch));
         if (std::strcmp(arch, "qwen4exp") == 0 &&
@@ -2643,7 +2642,8 @@ common_speculative_init_result::common_speculative_init_result(
             common_speculative_require_mtp_compatible(model_tgt, model_dft);
         }
 
-        llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
+        llama_context * ctx_dft = spec_mtp && model_dft->arch == LLM_ARCH_QWEN4EXP ?
+            llama_init_from_model_mtp(model_dft, cparams, model_tgt) : llama_init_from_model(model_dft, cparams);
         if (ctx_dft == nullptr) {
             LOG_ERR("%s: failed to create MTP context\n", __func__);
             return;

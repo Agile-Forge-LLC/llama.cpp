@@ -83,8 +83,10 @@ static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
 
 llama_context::llama_context(
         const llama_model & model,
-              llama_context_params params) :
+              llama_context_params params,
+        const llama_model * mtp_validated_target) :
     model(model),
+    mtp_validated_target(mtp_validated_target),
     cvec(std::make_unique<llama_adapter_cvec>()),
     loras(std::make_unique<llama_adapter_loras>()),
     balloc(std::make_unique<llama_batch_allocr>(model.hparams.n_pos_per_embd())) {
@@ -142,6 +144,11 @@ llama_context::llama_context(
     cparams.cb_eval_user_data = params.cb_eval_user_data;
 
     cparams.ctx_other = nullptr;
+
+    if (mtp_validated_target && (params.ctx_type != LLAMA_CONTEXT_TYPE_MTP || !params.ctx_other ||
+        llama_get_model(params.ctx_other) != mtp_validated_target)) {
+        throw std::runtime_error("MTP validated target must match ctx_other");
+    }
 
     // TODO: more generic
     if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
@@ -806,6 +813,10 @@ const llama_model & llama_context::get_model() const {
 
 const llama_cparams & llama_context::get_cparams() const {
     return cparams;
+}
+
+const llama_model * llama_context::get_mtp_validated_target() const {
+    return mtp_validated_target;
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
@@ -2596,6 +2607,7 @@ llm_graph_params llama_context::graph_params(
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
         /*.prec_policy =*/ &model.prec_policy,
+        /*.mtp_validated_target =*/ mtp_validated_target,
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
@@ -3795,9 +3807,10 @@ llama_context_params llama_context_default_params() {
     return result;
 }
 
-llama_context * llama_init_from_model(
+static llama_context * llama_init_from_model_impl(
                  llama_model * model,
-        llama_context_params   params) {
+        llama_context_params   params,
+       const llama_model   * mtp_validated_target) {
     if (!model) {
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
         return nullptr;
@@ -3885,7 +3898,7 @@ llama_context * llama_init_from_model(
     }
 
     try {
-        auto * ctx = new llama_context(*model, params);
+        auto * ctx = new llama_context(*model, params, mtp_validated_target);
         const auto & cparams = ctx->get_cparams();
 
         if (cparams.rope_scaling_type == LLAMA_ROPE_SCALING_TYPE_YARN && cparams.rope_freq_scale != model->hparams.rope_freq_scale_train) {
@@ -3900,6 +3913,17 @@ llama_context * llama_init_from_model(
     }
 
     return nullptr;
+}
+
+llama_context * llama_init_from_model(llama_model * model, llama_context_params params) {
+    return llama_init_from_model_impl(model, params, nullptr);
+}
+
+llama_context * llama_init_from_model_mtp(llama_model * model, llama_context_params params, const llama_model * validated_target) {
+    if (!validated_target) {
+        return nullptr;
+    }
+    return llama_init_from_model_impl(model, params, validated_target);
 }
 
 // deprecated

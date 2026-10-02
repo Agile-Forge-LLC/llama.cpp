@@ -44,7 +44,8 @@ struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
             const llama_model & model,
-                  llama_context_params params);
+                  llama_context_params params,
+            const llama_model * mtp_validated_target = nullptr);
 
     ~llama_context();
 
@@ -60,6 +61,7 @@ struct llama_context {
 
     const llama_model   & get_model()   const;
     const llama_cparams & get_cparams() const;
+    const llama_model   * get_mtp_validated_target() const;
 
     ggml_backend_sched_t get_sched() const;
 
@@ -287,6 +289,8 @@ private:
     //
 
     const llama_model & model;
+    // The target must outlive this draft context; no model-wide attachment state is changed.
+    const llama_model * const mtp_validated_target;
 
     llama_cparams cparams;
 
@@ -406,3 +410,6 @@ private:
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
 };
+
+// Internal creation path for a draft whose compatibility with ctx_other was checked by the caller.
+llama_context * llama_init_from_model_mtp(llama_model * model, llama_context_params params, const llama_model * validated_target);

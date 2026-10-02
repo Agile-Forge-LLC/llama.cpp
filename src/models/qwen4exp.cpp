@@ -23,13 +23,14 @@ static void qwen4exp_require_arr_len(llama_model_loader & ml, llm_kv kid, uint32
     }
 }
 
-static const llama_model & qwen4exp_shared_model(const llama_cparams & cparams, const llama_model & model, const char * name) {
+static const llama_model & qwen4exp_shared_model(const llm_graph_params & params, const char * name) {
+    const auto & cparams = params.cparams;
     if (cparams.ctx_other == nullptr) {
         throw std::runtime_error(format("QWEN4EXP MTP: this draft head has no '%s' of its own; "
                                         "load it as a draft of its target model (-md), not on its own", name));
     }
     const llama_model & other = *llama_get_model(cparams.ctx_other);
-    if (model.mtp_validated_target != &other) {
+    if (params.mtp_validated_target != &other) {
         throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require attachment validation against this target");
     }
     return other;
@@ -639,7 +640,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
 
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
     if (tok_embd_w == nullptr) {
-        tok_embd_w = qwen4exp_shared_model(cparams, model, "token_embd.weight").tok_embd;
+        tok_embd_w = qwen4exp_shared_model(params, "token_embd.weight").tok_embd;
         if (!tok_embd_w) {
             throw std::runtime_error("QWEN4EXP MTP: the target model has no token embeddings to borrow");
         }
@@ -770,7 +771,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     ggml_tensor * head_w = layer.nextn.shared_head_head ? layer.nextn.shared_head_head : model.output;
     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
     if (head_w == nullptr) {
-        const llama_model & other = qwen4exp_shared_model(cparams, model, "output.weight");
+        const llama_model & other = qwen4exp_shared_model(params, "output.weight");
         head_w = other.output;
         head_s = other.output_s;
         if (!head_w) {
