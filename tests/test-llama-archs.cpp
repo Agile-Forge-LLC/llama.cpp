@@ -513,15 +513,18 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
 }
 
 static void check_qwen4exp_mtp_nextn_count(const size_t seed, const float stdev) {
-    gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 2);
     tensor_data_params tensor_params = { seed, stdev };
     llama_model_params model_params = llama_model_default_params();
     ggml_backend_dev_t devices[] = { nullptr };
     model_params.devices = devices;
     model_params.load_mtp = true;
-    llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
-    if (model) {
-        throw std::runtime_error("qwen4exp accepted unsupported two-layer MTP head");
+    for (uint32_t n_layer_all : { 1u, 2u, 4u }) {
+        gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 2);
+        gguf_set_val_u32(gguf_ctx.get(), "qwen4exp.block_count", n_layer_all);
+        llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
+        if (model) {
+            throw std::runtime_error("qwen4exp accepted two NextN layers with block count " + std::to_string(n_layer_all));
+        }
     }
 }
 
@@ -974,7 +977,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
 
     if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
         check_qwen4exp_mtp_nextn_count(seed, stdev);
-        LOG_INF("qwen4exp MTP rejects two NextN layers: OK\n");
+        LOG_INF("qwen4exp MTP rejects two NextN layers (block counts 1, 2, 4): OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, false);
         LOG_INF("qwen4exp self-contained MTP verification batch: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, true);

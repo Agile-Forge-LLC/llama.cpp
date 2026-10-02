@@ -1111,7 +1111,7 @@ private:
             load_progress_callback(0.0f, &load_progress_spec);
             load_progress_spec.t_last_load_progress_ms = 0;  // reset so internal cbs aren't delayed
 
-            {
+            try {
                 common_params params_dft = common_base_params_to_speculative(params_base);
 
                 // progress callback
@@ -1134,6 +1134,9 @@ private:
 
                 params_base.speculative.draft.ctx_tgt = ctx_tgt;
                 params_base.speculative.draft.ctx_dft = ctx_dft;
+            } catch (const std::exception & e) {
+                SRV_ERR("failed to initialize speculative draft: %s\n", e.what());
+                return false;
             }
 
             load_progress_callback(1.0f, &load_progress_spec);
