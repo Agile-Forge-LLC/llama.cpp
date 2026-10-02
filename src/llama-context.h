@@ -40,6 +40,8 @@ struct llama_memory_buffer {
 
 using llama_memory_buffers = std::map<ggml_backend_buffer_type_t, llama_memory_buffer>;
 
+bool llama_mtp_buffer_needs_copy(ggml_backend_buffer_type_t buft, const std::vector<ggml_backend_t> & backends);
+
 struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
@@ -291,6 +293,15 @@ private:
     const llama_model & model;
     // The target must outlive this draft context; no model-wide attachment state is changed.
     const llama_model * const mtp_validated_target;
+
+    struct mtp_shared_copy {
+        ggml_context_ptr        ctx;
+        ggml_backend_buffer_ptr buf;
+    };
+    std::vector<mtp_shared_copy> mtp_shared_copies;
+    std::map<const ggml_tensor *, ggml_tensor *> mtp_shared_tensors;
+
+    void prepare_mtp_shared_tensors();
 
     llama_cparams cparams;
 

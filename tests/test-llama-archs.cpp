@@ -1498,6 +1498,18 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
         throw std::runtime_error("qwen4exp must support tensor split");
     }
 
+    if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
+        ggml_backend_ptr cpu(ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr));
+        if (!cpu) {
+            throw std::runtime_error("failed to initialize CPU backend for MTP buffer test");
+        }
+        if (llama_mtp_buffer_needs_copy(ggml_backend_cpu_buffer_type(), { cpu.get() }) ||
+            !llama_mtp_buffer_needs_copy(ggml_backend_cpu_buffer_type(), {})) {
+            throw std::runtime_error("shared MTP buffer compatibility decision failed");
+        }
+        LOG_INF("qwen4exp MTP compatible and unavailable backend buffer decisions: OK (2 cases)\n");
+    }
+
     struct user_data_t {
         struct {
             ggml_log_callback callback;

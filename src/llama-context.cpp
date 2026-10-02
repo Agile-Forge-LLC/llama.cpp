@@ -467,6 +467,10 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
         }
 
+        if (mtp_validated_target && model.arch == LLM_ARCH_QWEN4EXP) {
+            prepare_mtp_shared_tensors();
+        }
+
         sched_reserve();
 
         if (!cparams.flash_attn) {
@@ -817,6 +821,88 @@ const llama_cparams & llama_context::get_cparams() const {
 
 const llama_model * llama_context::get_mtp_validated_target() const {
     return mtp_validated_target;
+}
+
+bool llama_mtp_buffer_needs_copy(ggml_backend_buffer_type_t buft, const std::vector<ggml_backend_t> & backends) {
+    for (auto * backend : backends) {
+        if (ggml_backend_supports_buft(backend, buft)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void llama_context::prepare_mtp_shared_tensors() {
+    const auto & target = *mtp_validated_target;
+    const auto & nextn = model.layers[model.hparams.n_layer()].nextn;
+    std::vector<ggml_backend_t> draft_backends;
+    for (const auto & backend : backends) {
+        draft_backends.push_back(backend.get());
+    }
+
+    auto prepare = [&](const ggml_tensor * source, ggml_backend_buffer_type_t dst_buft) {
+        if (!source || mtp_shared_tensors.count(source)) {
+            return;
+        }
+        auto * src_buf = source->view_src ? source->view_src->buffer : source->buffer;
+        if (!src_buf || !source->data) {
+            throw std::runtime_error(format("QWEN4EXP MTP: borrowed tensor %s has no allocated data", source->name));
+        }
+        const auto src_buft = ggml_backend_buffer_get_type(src_buf);
+        if (!llama_mtp_buffer_needs_copy(src_buft, draft_backends)) {
+            return;
+        }
+
+        if (target.split_mode() == LLAMA_SPLIT_MODE_TENSOR && !target.devices.empty() && target.devices[0].is_meta &&
+            ggml_backend_buft_get_device(src_buft) == target.devices[0].dev) {
+            auto split_ud = target.get_split_state_ud;
+            const auto state = llama_meta_device_get_split_state(source, &split_ud);
+            if (state.axis != GGML_BACKEND_SPLIT_AXIS_0 && state.axis != GGML_BACKEND_SPLIT_AXIS_1 &&
+                state.axis != GGML_BACKEND_SPLIT_AXIS_2 && state.axis != GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
+                throw std::runtime_error(format("QWEN4EXP MTP: cannot gather borrowed tensor %s with split axis %d", source->name, state.axis));
+            }
+        }
+        if (!dst_buft || llama_mtp_buffer_needs_copy(dst_buft, draft_backends) || !ggml_is_contiguous(source)) {
+            throw std::runtime_error(format("QWEN4EXP MTP: no compatible buffer for borrowed tensor %s", source->name));
+        }
+
+        ggml_init_params init = { ggml_tensor_overhead(), nullptr, true };
+        ggml_context_ptr copy_ctx(ggml_init(init));
+        if (!copy_ctx) {
+            throw std::runtime_error(format("QWEN4EXP MTP: cannot create copy of %s", source->name));
+        }
+        ggml_tensor * copy = ggml_dup_tensor(copy_ctx.get(), source);
+        ggml_set_name(copy, source->name);
+        ggml_backend_buffer_ptr copy_buf(ggml_backend_alloc_ctx_tensors_from_buft(copy_ctx.get(), dst_buft));
+        if (!copy_buf) {
+            throw std::runtime_error(format("QWEN4EXP MTP: cannot allocate copy of %s", source->name));
+        }
+        ggml_backend_buffer_set_usage(copy_buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        const size_t size = ggml_nbytes(source);
+        std::vector<uint8_t> data(size);
+        // The meta buffer's tensor-get gathers split shards into the original tensor layout.
+        ggml_backend_tensor_get(source, data.data(), 0, size);
+        ggml_backend_tensor_set(copy, data.data(), 0, size);
+        mtp_shared_copies.push_back({ std::move(copy_ctx), std::move(copy_buf) });
+        mtp_shared_tensors.emplace(source, copy);
+        LLAMA_LOG_INFO("%s: copied borrowed tensor %s into %s\n", __func__, source->name, ggml_backend_buft_name(dst_buft));
+    };
+
+    if (!nextn.embed_tokens && !model.tok_embd) {
+        ggml_backend_buffer_type_t host_buft = nullptr;
+        if (!model.devices.empty()) {
+            host_buft = ggml_backend_dev_host_buffer_type(model.devices[0].dev);
+        }
+        if (!host_buft || llama_mtp_buffer_needs_copy(host_buft, draft_backends)) {
+            host_buft = ggml_backend_cpu_buffer_type();
+        }
+        prepare(target.tok_embd, host_buft);
+    }
+    if (!nextn.shared_head_head && !model.output) {
+        auto * output_buft = ggml_backend_dev_buffer_type(model.dev_output());
+        prepare(target.output, output_buft);
+        prepare(target.output_s, output_buft);
+    }
 }
 
 ggml_backend_sched_t llama_context::get_sched() const {
@@ -2608,6 +2694,7 @@ llm_graph_params llama_context::graph_params(
         /*.cross       =*/ &cross,
         /*.prec_policy =*/ &model.prec_policy,
         /*.mtp_validated_target =*/ mtp_validated_target,
+        /*.mtp_shared_tensors =*/ &mtp_shared_tensors,
         /*.samplers    =*/ sampling.samplers,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),

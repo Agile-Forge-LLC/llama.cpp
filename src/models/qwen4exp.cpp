@@ -36,6 +36,15 @@ static const llama_model & qwen4exp_shared_model(const llm_graph_params & params
     return other;
 }
 
+static ggml_tensor * qwen4exp_shared_tensor(const llm_graph_params & params, ggml_tensor * tensor) {
+    if (!tensor) {
+        return nullptr;
+    }
+    const auto & copies = *params.mtp_shared_tensors;
+    const auto it = copies.find(tensor);
+    return it == copies.end() ? tensor : it->second;
+}
+
 void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
     // the trunk must keep at least one block: n_layer() == n_layer_all - n_layer_nextn
     if (hparams.n_layer_nextn >= hparams.n_layer_all) {
@@ -640,7 +649,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
 
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
     if (tok_embd_w == nullptr) {
-        tok_embd_w = qwen4exp_shared_model(params, "token_embd.weight").tok_embd;
+        tok_embd_w = qwen4exp_shared_tensor(params, qwen4exp_shared_model(params, "token_embd.weight").tok_embd);
         if (!tok_embd_w) {
             throw std::runtime_error("QWEN4EXP MTP: the target model has no token embeddings to borrow");
         }
@@ -772,8 +781,8 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     ggml_tensor * head_s = layer.nextn.shared_head_head ? layer.nextn.shared_head_head_s : model.output_s;
     if (head_w == nullptr) {
         const llama_model & other = qwen4exp_shared_model(params, "output.weight");
-        head_w = other.output;
-        head_s = other.output_s;
+        head_w = qwen4exp_shared_tensor(params, other.output);
+        head_s = qwen4exp_shared_tensor(params, other.output_s);
         if (!head_w) {
             throw std::runtime_error("QWEN4EXP MTP: the target model has no LM head to borrow");
         }
