@@ -1,4 +1,5 @@
 #include "common.h"
+#include "speculative.h"
 #include "log.h"
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -10,6 +11,8 @@
 // TODO: replace with #include "llama-ext.h" in the future
 #include "../src/llama-arch.h"
 #include "../src/llama-model-saver.h"
+#include "../src/llama-model.h"
+#include "../src/llama-ext.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -113,7 +116,7 @@ static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32
     return ret;
 }
 
-static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const bool mtp = false) {
+static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const uint32_t n_nextn = 0) {
     gguf_context_ptr ret(gguf_init_empty());
     llama_model_saver ms(arch, ret.get());
     const uint32_t n_ctx = 256;
@@ -123,10 +126,10 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const 
     uint32_t n_head  = 2;
     uint32_t n_ff    = 384;
     uint32_t n_layer = 2;
-    if (mtp) {
+    if (n_nextn > 0) {
         GGML_ASSERT(arch == LLM_ARCH_QWEN4EXP);
-        n_layer = 3;
-        ms.add_kv(LLM_KV_NEXTN_PREDICT_LAYERS, uint32_t(1));
+        n_layer = 2 + n_nextn;
+        ms.add_kv(LLM_KV_NEXTN_PREDICT_LAYERS, n_nextn);
     } else if (arch == LLM_ARCH_LLAMA4) {
         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
     } else if (arch == LLM_ARCH_GEMMA4) {
@@ -509,8 +512,35 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     return std::make_pair(std::move(model), std::move(lctx));
 }
 
-static void check_qwen4exp_mtp_reserve(const size_t seed, const float stdev) {
+static void check_qwen4exp_mtp_nextn_count(const size_t seed, const float stdev) {
+    gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 2);
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices = devices;
+    model_params.load_mtp = true;
+    llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted unsupported two-layer MTP head");
+    }
+}
+
+struct mtp_test_shapes {
+    int64_t hidden_rows = -1;
+    int64_t logits_rows = -1;
+};
+
+static void check_qwen4exp_mtp_batch(const size_t seed, const float stdev, bool shared, bool mismatched = false) {
     gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, true);
+    if (mismatched) {
+        std::vector<std::string> texts(128);
+        std::vector<const char *> raw(128);
+        for (int i = 0; i < 128; ++i) {
+            texts[i] = i == 5 ? "other_5" : "tok_" + std::to_string(i);
+            raw[i] = texts[i].c_str();
+        }
+        gguf_set_arr_str(gguf_ctx.get(), "tokenizer.ggml.tokens", raw.data(), raw.size());
+    }
     tensor_data_params tensor_params = { seed, stdev };
 
     llama_model_params model_params = llama_model_default_params();
@@ -522,16 +552,137 @@ static void check_qwen4exp_mtp_reserve(const size_t seed, const float stdev) {
         throw std::runtime_error("failed to create qwen4exp MTP model");
     }
 
+    llama_model_ptr target;
+    llama_context_ptr target_ctx;
+    if (shared) {
+        gguf_context_ptr target_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+        target.reset(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
+        if (!target) {
+            throw std::runtime_error("failed to create qwen4exp target model");
+        }
+        llama_context_params target_params = llama_context_default_params();
+        target_params.n_ctx = 256;
+        target_params.n_threads = 4;
+        target_params.n_threads_batch = 4;
+        target_ctx.reset(llama_init_from_model(target.get(), target_params));
+        if (!target_ctx) {
+            throw std::runtime_error("failed to create qwen4exp target context");
+        }
+        model->tok_embd = nullptr;
+        model->output = nullptr;
+        auto & nextn = model->layers[model->hparams.n_layer()].nextn;
+        nextn.embed_tokens = nullptr;
+        nextn.shared_head_head = nullptr;
+    }
+
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
     ctx_params.n_ctx = 256;
     ctx_params.n_ubatch = 64;
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
+    ctx_params.ctx_other = target_ctx.get();
+    mtp_test_shapes shapes;
+    ctx_params.cb_eval_user_data = &shapes;
+    ctx_params.cb_eval = [](ggml_tensor * tensor, bool ask, void * data) {
+        if (!ask) {
+            auto & shapes = *static_cast<mtp_test_shapes *>(data);
+            if (strcmp(tensor->name, "h_nextn") == 0) {
+                shapes.hidden_rows = tensor->ne[2];
+            } else if (strcmp(tensor->name, "result_output") == 0) {
+                shapes.logits_rows = tensor->ne[1];
+            }
+        }
+        return true;
+    };
     llama_context_ptr ctx(llama_init_from_model(model.get(), ctx_params));
+    if (mismatched) {
+        if (ctx) {
+            throw std::runtime_error("qwen4exp borrowed incompatible target weights");
+        }
+        return;
+    }
     if (!ctx) {
         throw std::runtime_error("failed to reserve qwen4exp MTP context");
     }
+    llama_set_embeddings_nextn(ctx.get(), true, true);
+
+    std::vector<float> hidden(4 * llama_model_n_embd_out(model.get()), 0.1f);
+    common_batch batch(ctx.get());
+    for (int i = 0; i < 4; ++i) {
+        int idx = batch.add(5 + i, i, 0, i == 1 || i == 3);
+        batch.set_embd(idx, { hidden.data() + i * llama_model_n_embd_out(model.get()), 1, (size_t) llama_model_n_embd_out(model.get()) });
+    }
+    if (llama_process(ctx.get(), LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0 ||
+        shapes.hidden_rows != 2 || shapes.logits_rows != 2 ||
+        llama_get_embeddings_nextn_ith(ctx.get(), 1) == nullptr ||
+        llama_get_embeddings_nextn_ith(ctx.get(), 3) == nullptr ||
+        llama_get_logits_ith(ctx.get(), 1) == nullptr ||
+        llama_get_logits_ith(ctx.get(), 3) == nullptr) {
+        throw std::runtime_error(shared ? "qwen4exp shared MTP verification batch failed" : "qwen4exp self-contained MTP verification batch failed");
+    }
+}
+
+static void check_qwen4exp_mtp_reject_mismatch(const size_t seed, const float stdev, int mismatch) {
+    gguf_context_ptr draft_gguf  = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_context_ptr target_gguf = get_gguf_ctx(mismatch == 1 ? LLM_ARCH_QWEN35MOE : LLM_ARCH_QWEN4EXP, true);
+    std::vector<std::string> texts(128);
+    std::vector<const char *> raw(128);
+    for (int i = 0; i < 128; ++i) {
+        texts[i] = i == 5 ? "other_5" : "tok_" + std::to_string(i);
+        raw[i] = texts[i].c_str();
+    }
+    if (mismatch == 0) {
+        gguf_set_arr_str(draft_gguf.get(), "tokenizer.ggml.tokens", raw.data(), raw.size());
+    }
+
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices  = devices;
+    model_params.load_mtp = true;
+    llama_model_ptr target(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
+    llama_model_ptr draft(llama_model_init_from_user(draft_gguf.get(), set_tensor_data, &tensor_params, model_params));
+    if (!target || !draft) {
+        throw std::runtime_error("failed to create qwen4exp incompatible MTP models");
+    }
+
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = 256;
+    ctx_params.n_threads = 4;
+    ctx_params.n_threads_batch = 4;
+    llama_context_ptr target_ctx(llama_init_from_model(target.get(), ctx_params));
+    ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    ctx_params.ctx_other = target_ctx.get();
+    llama_context_ptr draft_ctx(llama_init_from_model(draft.get(), ctx_params));
+    if (!target_ctx || !draft_ctx) {
+        throw std::runtime_error("failed to reserve qwen4exp incompatible MTP contexts");
+    }
+    if (mismatch == 2) {
+        target->hparams.n_embd += 1;
+    }
+
+    common_params_speculative params;
+    params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+    params.draft.ctx_tgt = target_ctx.get();
+    params.draft.ctx_dft = draft_ctx.get();
+    params.draft.backend_sampling = false;
+    try {
+        common_speculative_ptr spec(common_speculative_init(params, 1));
+    } catch (const std::runtime_error & err) {
+        if (mismatch == 2) {
+            target->hparams.n_embd -= 1;
+        }
+        if (std::string(err.what()).find(mismatch == 0 ? "vocab" : "hidden size") != std::string::npos ||
+            (mismatch == 1 && std::string(err.what()).find("architecture") != std::string::npos)) {
+            return;
+        }
+        throw;
+    }
+    if (mismatch == 2) {
+        target->hparams.n_embd -= 1;
+    }
+    throw std::runtime_error("qwen4exp accepted incompatible MTP draft");
 }
 
 static std::vector<float> get_logits(
@@ -822,8 +973,20 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
     }, &ud);
 
     if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
-        check_qwen4exp_mtp_reserve(seed, stdev);
-        LOG_INF("qwen4exp MTP context reserve: OK\n");
+        check_qwen4exp_mtp_nextn_count(seed, stdev);
+        LOG_INF("qwen4exp MTP rejects two NextN layers: OK\n");
+        check_qwen4exp_mtp_batch(seed, stdev, false);
+        LOG_INF("qwen4exp self-contained MTP verification batch: OK\n");
+        check_qwen4exp_mtp_batch(seed, stdev, true);
+        LOG_INF("qwen4exp shared MTP verification batch: OK\n");
+        check_qwen4exp_mtp_batch(seed, stdev, true, true);
+        LOG_INF("qwen4exp shared MTP rejects mismatched vocabulary: OK\n");
+        check_qwen4exp_mtp_reject_mismatch(seed, stdev, 0);
+        LOG_INF("qwen4exp MTP rejects mismatched vocabulary: OK\n");
+        check_qwen4exp_mtp_reject_mismatch(seed, stdev, 1);
+        LOG_INF("qwen4exp MTP rejects mismatched architecture: OK\n");
+        check_qwen4exp_mtp_reject_mismatch(seed, stdev, 2);
+        LOG_INF("qwen4exp MTP rejects mismatched hidden size: OK\n");
     }
 
     const std::vector<llama_token> tokens = get_tokens(128, 128, seed);

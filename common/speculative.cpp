@@ -129,6 +129,28 @@ static bool common_speculative_are_compatible(
     return true;
 }
 
+static void common_speculative_require_mtp_compatible(const llama_model * model_tgt, const llama_model * model_dft) {
+    char arch_tgt[64] = {};
+    char arch_dft[64] = {};
+    llama_model_meta_val_str(model_tgt, "general.architecture", arch_tgt, sizeof(arch_tgt));
+    llama_model_meta_val_str(model_dft, "general.architecture", arch_dft, sizeof(arch_dft));
+
+    if ((std::strcmp(arch_tgt, "qwen4exp") == 0 || std::strcmp(arch_dft, "qwen4exp") == 0) &&
+        (std::strcmp(arch_tgt, arch_dft) != 0 || llama_model_n_embd(model_tgt) != llama_model_n_embd(model_dft))) {
+        throw std::runtime_error("QWEN4EXP MTP draft and target must have matching architecture and hidden size");
+    }
+    if (llama_model_n_embd_out(model_tgt) != llama_model_n_embd_out(model_dft)) {
+        throw std::runtime_error("MTP input row width must match the target h_nextn width");
+    }
+    if (std::strcmp(arch_dft, "qwen4exp") == 0 &&
+        llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)) != llama_vocab_n_tokens(llama_model_get_vocab(model_dft))) {
+        throw std::runtime_error("QWEN4EXP MTP draft and target vocab sizes must match");
+    }
+    if (!common_speculative_are_compatible(model_tgt, model_dft)) {
+        throw std::runtime_error("MTP draft and target vocabs are not compatible");
+    }
+}
+
 using common_speculative_draft_params_vec = std::vector<common_speculative_draft_params>;
 
 // state of an implementation of speculative decoding
@@ -1372,9 +1394,16 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         auto * ctx_dft = this->params.ctx_dft;
         GGML_ASSERT(ctx_tgt && ctx_dft && "MTP requires ctx_tgt and ctx_dft to be set");
 
-        n_embd = llama_model_n_embd_out(llama_get_model(ctx_dft));
-        GGML_ASSERT(n_embd == llama_model_n_embd_out(llama_get_model(ctx_tgt)) &&
-                "MTP input row width must match the target h_nextn width");
+        const llama_model * model_tgt = llama_get_model(ctx_tgt);
+        const llama_model * model_dft = llama_get_model(ctx_dft);
+        common_speculative_require_mtp_compatible(model_tgt, model_dft);
+        char arch[64] = {};
+        llama_model_meta_val_str(model_dft, "general.architecture", arch, sizeof(arch));
+        if (std::strcmp(arch, "qwen4exp") == 0 &&
+            llama_get_ctx_other(ctx_dft) != nullptr && llama_get_ctx_other(ctx_dft) != ctx_tgt) {
+            throw std::runtime_error("QWEN4EXP MTP shared tensors must come from the target context");
+        }
+        n_embd = llama_model_n_embd_out(model_dft);
         n_mtp_layers = std::max(1, (int) llama_model_n_layer_nextn(llama_get_model(ctx_dft)));
 
         SPC_TRC("%s", "adding speculative implementation 'draft-mtp'\n");
@@ -1417,8 +1446,6 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
 
-        char arch[64] = {0};
-        llama_model_meta_val_str(llama_get_model(ctx_dft), "general.architecture", arch, sizeof(arch));
         is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt && std::strcmp(arch, "gemma4-assistant") == 0;
         chain_heads   = n_mtp_layers > 1 && !is_mem_shared;
 
@@ -2548,6 +2575,10 @@ common_speculative_init_result::common_speculative_init_result(
         }
 
         pimpl->model.reset(model_dft);
+
+        if (spec_mtp) {
+            common_speculative_require_mtp_compatible(model_tgt, model_dft);
+        }
 
         llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
         if (ctx_dft == nullptr) {

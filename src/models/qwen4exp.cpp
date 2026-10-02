@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstring>
 
 // bad metadata must be catchable: GGML_ASSERT aborts the whole process
 static void qwen4exp_require_nonzero(const llama_model_loader & ml, llm_kv kid, uint32_t value) {
@@ -29,8 +30,18 @@ static const llama_model & qwen4exp_shared_model(const llama_cparams & cparams, 
                                         "load it as a draft of its target model (-md), not on its own", name));
     }
     const llama_model & other = *llama_get_model(cparams.ctx_other);
-    if (other.hparams.n_embd != model.hparams.n_embd || other.vocab.n_tokens() != model.vocab.n_tokens()) {
-        throw std::runtime_error(format("QWEN4EXP MTP: draft and target disagree on the shape of '%s'", name));
+    if (other.arch != LLM_ARCH_QWEN4EXP || other.hparams.n_embd != model.hparams.n_embd ||
+        other.hparams.n_embd_out() != model.hparams.n_embd_out()) {
+        throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require a qwen4exp target with matching hidden size");
+    }
+    if (other.vocab.n_tokens() != model.vocab.n_tokens() || other.vocab.get_type() != model.vocab.get_type() ||
+        other.vocab.token_bos() != model.vocab.token_bos() || other.vocab.token_eos() != model.vocab.token_eos()) {
+        throw std::runtime_error("QWEN4EXP MTP: borrowed tensors require a matching target vocab");
+    }
+    for (uint32_t id = 0; id < model.vocab.n_tokens(); ++id) {
+        if (std::strcmp(other.vocab.token_get_text(id), model.vocab.token_get_text(id)) != 0) {
+            throw std::runtime_error(format("QWEN4EXP MTP: borrowed tensors require a matching target vocab (token %u differs)", id));
+        }
     }
     return other;
 }
@@ -41,6 +52,9 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         throw std::runtime_error(format("%s must be less than %s, got %u",
                                         ml.llm_kv(LLM_KV_NEXTN_PREDICT_LAYERS).c_str(),
                                         ml.llm_kv(LLM_KV_BLOCK_COUNT).c_str(), hparams.n_layer_nextn));
+    }
+    if (hparams.n_layer_nextn > 1) {
+        throw std::runtime_error(format("QWEN4EXP MTP supports only one NextN layer, got %u", hparams.n_layer_nextn));
     }
 
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
