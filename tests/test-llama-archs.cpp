@@ -113,7 +113,7 @@ static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32
     return ret;
 }
 
-static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
+static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe, const bool mtp = false) {
     gguf_context_ptr ret(gguf_init_empty());
     llama_model_saver ms(arch, ret.get());
     const uint32_t n_ctx = 256;
@@ -123,7 +123,11 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     uint32_t n_head  = 2;
     uint32_t n_ff    = 384;
     uint32_t n_layer = 2;
-    if (arch == LLM_ARCH_LLAMA4) {
+    if (mtp) {
+        GGML_ASSERT(arch == LLM_ARCH_QWEN4EXP);
+        n_layer = 3;
+        ms.add_kv(LLM_KV_NEXTN_PREDICT_LAYERS, uint32_t(1));
+    } else if (arch == LLM_ARCH_LLAMA4) {
         n_layer = 4; // hparams.n_no_rope_layer_step is hard-coded to 4
     } else if (arch == LLM_ARCH_GEMMA4) {
         n_embd = 128;
@@ -505,6 +509,31 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     return std::make_pair(std::move(model), std::move(lctx));
 }
 
+static void check_qwen4exp_mtp_reserve(const size_t seed, const float stdev) {
+    gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, true);
+    tensor_data_params tensor_params = { seed, stdev };
+
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices  = devices;
+    model_params.load_mtp = true;
+    llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (!model) {
+        throw std::runtime_error("failed to create qwen4exp MTP model");
+    }
+
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    ctx_params.n_ctx = 256;
+    ctx_params.n_ubatch = 64;
+    ctx_params.n_threads = 4;
+    ctx_params.n_threads_batch = 4;
+    llama_context_ptr ctx(llama_init_from_model(model.get(), ctx_params));
+    if (!ctx) {
+        throw std::runtime_error("failed to reserve qwen4exp MTP context");
+    }
+}
+
 static std::vector<float> get_logits(
         llama_model * model, llama_context * lctx, const std::vector<llama_token> & tokens, bool encode = false) {
     const uint32_t n_vocab  = llama_vocab_n_tokens(llama_model_get_vocab(model));
@@ -791,6 +820,11 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
             ud->log_old.callback(level, text, ud->log_old.user_data);
         }
     }, &ud);
+
+    if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
+        check_qwen4exp_mtp_reserve(seed, stdev);
+        LOG_INF("qwen4exp MTP context reserve: OK\n");
+    }
 
     const std::vector<llama_token> tokens = get_tokens(128, 128, seed);
 
