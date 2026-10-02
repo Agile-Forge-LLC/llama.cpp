@@ -66,7 +66,8 @@ struct common_speculative_config {
 
 static bool common_speculative_are_compatible(
     const llama_model * model_tgt,
-    const llama_model * model_dft) {
+    const llama_model * model_dft,
+    int start_token_id = SPEC_VOCAB_CHECK_START_TOKEN_ID) {
     const llama_vocab * vocab_tgt = llama_model_get_vocab(model_tgt);
     const llama_vocab * vocab_dft = llama_model_get_vocab(model_dft);
 
@@ -112,7 +113,7 @@ static bool common_speculative_are_compatible(
             return false;
         }
 
-        for (int i = SPEC_VOCAB_CHECK_START_TOKEN_ID; i < std::min(n_vocab_tgt, n_vocab_dft); ++i) {
+        for (int i = start_token_id; i < std::min(n_vocab_tgt, n_vocab_dft); ++i) {
             const char * token_text_tgt = llama_vocab_get_text(vocab_tgt, i);
             const char * token_text_dft = llama_vocab_get_text(vocab_dft, i);
 
@@ -146,7 +147,7 @@ static void common_speculative_require_mtp_compatible(const llama_model * model_
         llama_vocab_n_tokens(llama_model_get_vocab(model_tgt)) != llama_vocab_n_tokens(llama_model_get_vocab(model_dft))) {
         throw std::runtime_error("QWEN4EXP MTP draft and target vocab sizes must match");
     }
-    if (!common_speculative_are_compatible(model_tgt, model_dft)) {
+    if (!common_speculative_are_compatible(model_tgt, model_dft, std::strcmp(arch_dft, "qwen4exp") == 0 ? 0 : SPEC_VOCAB_CHECK_START_TOKEN_ID)) {
         throw std::runtime_error("MTP draft and target vocabs are not compatible");
     }
 }

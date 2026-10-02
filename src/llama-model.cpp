@@ -1325,7 +1325,10 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_POOLING_TYPE,            hparams.pooling_type,    false);
     ml.get_key(LLM_KV_CLASSIFIER_POOLING_TYPE, hparams.pooling_type_cls, false);
     ml.get_key(LLM_KV_BLOCK_COUNT,             hparams.n_layer_all);
-    GGML_ASSERT(hparams.n_layer_all > 0 && hparams.n_layer_all <= LLAMA_MAX_LAYERS);
+    if (hparams.n_layer_all == 0 || hparams.n_layer_all > LLAMA_MAX_LAYERS) {
+        throw std::runtime_error(format("%s must be between 1 and %u, got %u",
+                                        ml.llm_kv(LLM_KV_BLOCK_COUNT).c_str(), LLAMA_MAX_LAYERS, hparams.n_layer_all));
+    }
     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,    hparams.n_layer_nextn,   false);
     if (hparams.n_layer_nextn > hparams.n_layer_all) {
         throw std::runtime_error(format("%s (%u) must not exceed %s (%u)",
@@ -1362,19 +1365,22 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     // models may route a different number of experts per layer, so validate the maximum
     uint32_t n_expert_used_max = hparams.n_expert_used_max();
 
-    GGML_ASSERT(hparams.n_expert <= LLAMA_MAX_EXPERTS);
-    GGML_ASSERT(n_expert_used_max <= hparams.n_expert);
+    if (hparams.n_expert > LLAMA_MAX_EXPERTS || n_expert_used_max > hparams.n_expert) {
+        throw std::runtime_error("invalid expert count or expert used count in model metadata");
+    }
     if (hparams.n_expert > 0) {
-        GGML_ASSERT(n_expert_used_max > 0);
-        GGML_ASSERT(hparams.n_expert_groups < hparams.n_expert);
+        if (n_expert_used_max == 0 || hparams.n_expert_groups >= hparams.n_expert) {
+            throw std::runtime_error("invalid expert used count or expert group count in model metadata");
+        }
         if (hparams.n_expert_groups > 1) {
-            GGML_ASSERT(hparams.n_expert % hparams.n_expert_groups == 0);
-            GGML_ASSERT(hparams.n_group_used > 0);
-            GGML_ASSERT(hparams.n_group_used < hparams.n_expert_groups);
+            if (hparams.n_expert % hparams.n_expert_groups != 0 || hparams.n_group_used == 0 || hparams.n_group_used >= hparams.n_expert_groups) {
+                throw std::runtime_error("invalid expert group configuration in model metadata");
+            }
         }
     } else {
-        GGML_ASSERT(n_expert_used_max == 0);
-        GGML_ASSERT(hparams.n_expert_groups == 0);
+        if (n_expert_used_max != 0 || hparams.n_expert_groups != 0) {
+            throw std::runtime_error("expert groups or expert used count specified without experts");
+        }
     }
 
     std::fill(hparams.n_head_arr.begin(),       hparams.n_head_arr.end(),       0);
@@ -1421,7 +1427,9 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
     std::string rope_scaling("linear");
     ml.get_key(LLM_KV_ROPE_SCALING_TYPE, rope_scaling, false);
     hparams.rope_scaling_type_train = llama_rope_scaling_type_from_string(rope_scaling);
-    GGML_ASSERT(hparams.rope_scaling_type_train != LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED);
+    if (hparams.rope_scaling_type_train == LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED) {
+        throw std::runtime_error(format("invalid %s: %s", ml.llm_kv(LLM_KV_ROPE_SCALING_TYPE).c_str(), rope_scaling.c_str()));
+    }
 
     // TODO: Handle SWA metadata similarly when models start implementing it
     // rope_freq_scale (inverse of the kv) is optional
@@ -1799,10 +1807,12 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     // Tied NVFP4 output is valid when no separate LM-head scale tensors are present.
     // If sidecar scales exist, the output weight must be an actual output tensor.
-    GGML_ASSERT(!(output && tok_embd &&
+    if (output && tok_embd &&
             strcmp(output->name, tok_embd->name) == 0 &&
             output->type == GGML_TYPE_NVFP4 &&
-            (output_s || output_in_s)));
+            (output_s || output_in_s)) {
+        throw std::runtime_error("tied NVFP4 output cannot have separate scale tensors");
+    }
     // populate tensors_by_name
     for (auto & [_, ctx_ptr] : ml.ctx_map) {
         for (auto * cur = ggml_get_first_tensor(ctx_ptr.get()); cur != NULL; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {

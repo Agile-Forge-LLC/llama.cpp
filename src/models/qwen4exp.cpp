@@ -56,10 +56,26 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
     if (hparams.n_layer_nextn > 1) {
         throw std::runtime_error(format("QWEN4EXP MTP supports only one NextN layer, got %u", hparams.n_layer_nextn));
     }
+    if (hparams.n_embd == 0 || hparams.n_expert == 0 || hparams.n_head() == 0 || hparams.n_head_kv() == 0 ||
+        hparams.n_embd_head_k() == 0 || hparams.n_embd_head_k() != hparams.n_embd_head_v() ||
+        hparams.n_head() % hparams.n_head_kv() != 0 || hparams.n_rot() > hparams.n_embd_head_k()) {
+        throw std::runtime_error("QWEN4EXP has invalid embedding, attention head, or expert dimensions");
+    }
+    for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+        if (hparams.n_head(il) == 0 || hparams.n_head_kv(il) == 0 || hparams.n_ff(il) == 0 ||
+            hparams.n_expert_used(il) == 0 || hparams.n_head(il) != hparams.n_head() ||
+            hparams.n_head_kv(il) != hparams.n_head_kv() || hparams.n_expert_used(il) != hparams.n_expert_used() ||
+            hparams.n_head(il) % hparams.n_head_kv(il) != 0) {
+            throw std::runtime_error(format("QWEN4EXP block %u has invalid attention or expert dimensions", il));
+        }
+    }
 
     ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp_arr, hparams.n_layer_all, false);
     ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
+    if (hparams.n_ff_exp() == 0 && hparams.n_ff() / hparams.n_expert_used() == 0) {
+        throw std::runtime_error("QWEN4EXP expert feed-forward width must be greater than zero");
+    }
 
     ml.get_key_or_arr(LLM_KV_ROPE_DIMENSION_SECTIONS,    hparams.rope_sections, 4, true);
 
@@ -84,6 +100,9 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
                                         ml.llm_kv(LLM_KV_HYPER_CONNECTION_COUNT).c_str(), hparams.dsv4_hc_mult));
     }
     qwen4exp_require_nonzero(ml, LLM_KV_HYPER_CONNECTION_LOW_RANK, hparams.hc_low_rank);
+    if (uint64_t(hparams.dsv4_hc_mult) * hparams.n_embd > UINT32_MAX) {
+        throw std::runtime_error("QWEN4EXP hyper-connection hidden width is too large");
+    }
     hparams.n_embd_out_impl = hparams.dsv4_hc_mult * hparams.n_embd;
 
     ml.get_key(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT, hparams.indexer_n_head);
@@ -186,6 +205,9 @@ void llama_model_qwen4exp::load_arch_hparams(llama_model_loader & ml) {
         for (uint32_t i = 0; i < hparams.n_layer_all; ++i) {
             hparams.is_recr_impl[i] = (i < hparams.n_layer()) && ((i + 1) % full_attn_interval != 0);
         }
+    }
+    if (hparams.n_layer_nextn > 0 && hparams.is_recr(hparams.n_layer())) {
+        throw std::runtime_error("QWEN4EXP MTP requires a dense-attention NextN block, not a recurrent block");
     }
 
     // the PLE conv history is a row of the recurrent cache, which linear layers alone have
@@ -334,6 +356,17 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
         nextn.hc_head_up   = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_UP,   "weight", il), { hc_lr, hc_dim }, mtp_flags);
         nextn.embed_tokens     = create_tensor(tn(LLM_TENSOR_NEXTN_EMBED_TOKENS,     "weight", il), { n_embd, n_vocab }, mtp_flags | TENSOR_NOT_REQUIRED);
         nextn.shared_head_head = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "weight", il), { n_embd, n_vocab }, mtp_flags | TENSOR_NOT_REQUIRED);
+        const auto & layer = layers[il];
+        if (ml.load_mtp && (!layer.hc_attn_norm || !layer.hc_attn_down || !layer.hc_attn_up || !layer.hc_attn_inject ||
+            !layer.hc_ffn_norm || !layer.hc_ffn_down || !layer.hc_ffn_up || !layer.hc_ffn_inject ||
+            !layer.wq || !layer.wk || !layer.wv || !layer.wo || !layer.attn_q_norm || !layer.attn_k_norm ||
+            !layer.ffn_gate_inp || !layer.ffn_down_exps ||
+            (!layer.ffn_gate_up_exps && (!layer.ffn_gate_exps || !layer.ffn_up_exps)) ||
+            !layer.ffn_gate_inp_shexp || !layer.ffn_gate_shexp || !layer.ffn_up_shexp || !layer.ffn_down_shexp ||
+            !nextn.eh_proj || !nextn.enorm || !nextn.hnorm || !nextn.hc_head_norm ||
+            !nextn.hc_head_down || !nextn.hc_head_up)) {
+            throw std::runtime_error(format("QWEN4EXP MTP block %d is missing a required dense-attention or NextN tensor", il));
+        }
     }
 }
 
@@ -569,13 +602,16 @@ llama_model_qwen4exp::graph::graph(const llama_model & model, const llm_graph_pa
 // TODO: QSA for the draft head; dense is a numerical superset below the 2048-token budget.
 llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_graph_params & params) :
     graph(model, params, no_build{}) {
-    GGML_ASSERT(hparams.n_layer_nextn > 0 && "QWEN4EXP MTP requires n_layer_nextn > 0");
-    GGML_ASSERT(hparams.n_layer_nextn == 1 && "QWEN4EXP MTP currently only supports a single MTP block");
+    if (hparams.n_layer_nextn != 1) {
+        throw std::runtime_error("QWEN4EXP MTP requires exactly one NextN block");
+    }
     GGML_ASSERT(ubatch.token && "QWEN4EXP MTP requires token input");
 
     const int64_t hc     = hparams.dsv4_hc_mult;
     const int64_t hc_dim = hc * n_embd;
-    GGML_ASSERT(hparams.n_embd_out() == (uint32_t) hc_dim && "QWEN4EXP MTP hidden width mismatch");
+    if (hparams.n_embd_out() != (uint32_t) hc_dim) {
+        throw std::runtime_error("QWEN4EXP MTP hidden width mismatch");
+    }
 
     const int il = hparams.n_layer() + cparams.nextn_layer_offset;
     GGML_ASSERT(cparams.nextn_layer_offset >= 0 &&
@@ -583,10 +619,9 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
                 "nextn_layer_offset out of range [0, n_layer_nextn)");
     const auto & layer = model.layers[il];
 
-    GGML_ASSERT(layer.nextn.eh_proj     && "MTP block missing nextn.eh_proj");
-    GGML_ASSERT(layer.nextn.enorm       && "MTP block missing nextn.enorm");
-    GGML_ASSERT(layer.nextn.hnorm       && "MTP block missing nextn.hnorm");
-    GGML_ASSERT(layer.nextn.hc_head_norm && "MTP block missing nextn.hc_head_norm");
+    if (!layer.nextn.eh_proj || !layer.nextn.enorm || !layer.nextn.hnorm || !layer.nextn.hc_head_norm) {
+        throw std::runtime_error("QWEN4EXP MTP block is missing NextN tensors");
+    }
 
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
@@ -606,7 +641,9 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
     if (tok_embd_w == nullptr) {
         tok_embd_w = qwen4exp_shared_model(cparams, model, "token_embd.weight").tok_embd;
-        GGML_ASSERT(tok_embd_w && "QWEN4EXP MTP: the target model has no token embeddings to borrow");
+        if (!tok_embd_w) {
+            throw std::runtime_error("QWEN4EXP MTP: the target model has no token embeddings to borrow");
+        }
     }
     ggml_tensor * tok_embd   = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
     cb(tok_embd, "mtp_tok_embd", il);
@@ -645,7 +682,9 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     cb(cur, "mtp_hc_attn_pre", il);
 
     const int64_t n_embd_head = hparams.n_embd_head_v();
-    GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
+    if (n_embd_head != hparams.n_embd_head_k()) {
+        throw std::runtime_error("QWEN4EXP MTP requires matching key and value head dimensions");
+    }
 
     ggml_tensor * Qcur_full = build_lora_mm(layer.wq, cur, layer.wq_s);
     cb(Qcur_full, "mtp_Qcur_full", il);
@@ -735,7 +774,9 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
         const llama_model & other = qwen4exp_shared_model(cparams, model, "output.weight");
         head_w = other.output;
         head_s = other.output_s;
-        GGML_ASSERT(head_w && "QWEN4EXP MTP: the target model has no LM head to borrow");
+        if (!head_w) {
+            throw std::runtime_error("QWEN4EXP MTP: the target model has no LM head to borrow");
+        }
     }
 
     cur = build_lora_mm(head_w, cur, head_s);

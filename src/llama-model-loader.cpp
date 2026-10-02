@@ -1358,7 +1358,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
     }
 
-    GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
+    if (ggml_nbytes(&t_meta) != ggml_nbytes(cur)) {
+        throw std::runtime_error(format("tensor '%s' cannot be reshaped without changing its byte size", tn.str().c_str()));
+    }
 
     ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
     if (buft == nullptr) {

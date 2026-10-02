@@ -95,6 +95,7 @@ static void usage(char ** argv) {
     LOG("  -s, --seed <seed>        Set the random seed for tensor initialization and token generation\n");
     LOG("  -d, --stdev <stdev>      Set the standard deviation of the tensor initialization distribution (default: 0.1f)\n");
     LOG("  -o, --out <dir>          Save generated test models to <dir> instead of running backend tests\n");
+    LOG("  --mtp-fixtures <dir>     Save qwen4exp target and invalid MTP draft GGUFs to <dir>\n");
     LOG("  -v <N>                   Set log verbosity level\n");
     LOG("  -b, --backend <backend>  Run only on the given backend device\n");
     LOG("  -h, --help               Show this help message\n\n");
@@ -528,6 +529,104 @@ static void check_qwen4exp_mtp_nextn_count(const size_t seed, const float stdev)
     }
 }
 
+static void check_qwen4exp_mtp_bad_metadata(const size_t seed, const float stdev) {
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices = devices;
+    model_params.load_mtp = true;
+
+    for (uint32_t n_layer_all : { 0u, uint32_t(LLAMA_MAX_LAYERS + 1) }) {
+        gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+        gguf_set_val_u32(gguf_ctx.get(), "qwen4exp.block_count", n_layer_all);
+        llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
+        if (model) {
+            throw std::runtime_error("qwen4exp accepted invalid block count " + std::to_string(n_layer_all));
+        }
+    }
+
+    gguf_context_ptr gguf_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    const uint8_t recurrent[] = { 1, 0, 1 };
+    gguf_set_arr_data(gguf_ctx.get(), "qwen4exp.attention.recurrent_layers", GGUF_TYPE_BOOL, recurrent, 3);
+    llama_model_ptr model(llama_model_init_from_user(gguf_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted a recurrent NextN block");
+    }
+
+    gguf_context_ptr experts_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_u32(experts_ctx.get(), "qwen4exp.expert_count", LLAMA_MAX_EXPERTS + 1);
+    model.reset(llama_model_init_from_user(experts_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted an oversized expert count");
+    }
+
+    gguf_context_ptr heads_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_u32(heads_ctx.get(), "qwen4exp.attention.head_count", 0);
+    model.reset(llama_model_init_from_user(heads_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted zero attention heads");
+    }
+
+    gguf_context_ptr ffn_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_u32(ffn_ctx.get(), "qwen4exp.feed_forward_length", 0);
+    model.reset(llama_model_init_from_user(ffn_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted zero expert feed-forward width");
+    }
+
+    gguf_context_ptr rope_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_str(rope_ctx.get(), "qwen4exp.rope.scaling.type", "invalid-scaling");
+    model.reset(llama_model_init_from_user(rope_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted invalid rope scaling");
+    }
+
+    gguf_context_ptr hc_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    gguf_set_val_u32(hc_ctx.get(), "qwen4exp.hyper_connection.count", UINT32_MAX);
+    model.reset(llama_model_init_from_user(hc_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (model) {
+        throw std::runtime_error("qwen4exp accepted overflowing hyper-connection width");
+    }
+}
+
+static int save_qwen4exp_mtp_invalid_fixtures(const std::string & dir, size_t seed, float stdev) {
+    tensor_data_params tensor_params = { seed, stdev };
+    llama_model_params model_params = llama_model_default_params();
+    ggml_backend_dev_t devices[] = { nullptr };
+    model_params.devices = devices;
+    model_params.load_mtp = true;
+
+    gguf_context_ptr target_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+    llama_model_ptr target(llama_model_init_from_user(target_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (!target) {
+        throw std::runtime_error("failed to generate qwen4exp target fixture");
+    }
+    llama_model_saver target_saver(target.get());
+    target_saver.add_kv_from_model();
+    target_saver.add_tensors_from_model();
+    target_saver.save(dir + "/qwen4exp-target.gguf");
+
+    gguf_context_ptr draft_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+    llama_model_ptr draft(llama_model_init_from_user(draft_ctx.get(), set_tensor_data, &tensor_params, model_params));
+    if (!draft) {
+        throw std::runtime_error("failed to generate qwen4exp MTP draft fixture");
+    }
+    for (uint32_t n_layer_all : { 0u, uint32_t(LLAMA_MAX_LAYERS + 1), 3u }) {
+        llama_model_saver saver(draft.get());
+        saver.add_kv_from_model();
+        saver.add_tensors_from_model();
+        if (n_layer_all != 3) {
+            gguf_set_val_u32(saver.gguf_ctx, "qwen4exp.block_count", n_layer_all);
+        } else {
+            const uint8_t recurrent[] = { 1, 0, 1 };
+            gguf_set_arr_data(saver.gguf_ctx, "qwen4exp.attention.recurrent_layers", GGUF_TYPE_BOOL, recurrent, 3);
+        }
+        const std::string name = n_layer_all == 0 ? "block-zero" : n_layer_all == 3 ? "nextn-recurrent" : "block-oversize";
+        saver.save(dir + "/qwen4exp-" + name + ".gguf");
+    }
+    return 0;
+}
+
 struct mtp_test_shapes {
     int64_t hidden_rows = -1;
     int64_t logits_rows = -1;
@@ -632,10 +731,10 @@ static void check_qwen4exp_mtp_reject_mismatch(const size_t seed, const float st
     std::vector<std::string> texts(128);
     std::vector<const char *> raw(128);
     for (int i = 0; i < 128; ++i) {
-        texts[i] = i == 5 ? "other_5" : "tok_" + std::to_string(i);
+        texts[i] = i == (mismatch == 3 ? 2 : 5) ? "other_" + std::to_string(i) : "tok_" + std::to_string(i);
         raw[i] = texts[i].c_str();
     }
-    if (mismatch == 0) {
+    if (mismatch == 0 || mismatch == 3) {
         gguf_set_arr_str(draft_gguf.get(), "tokenizer.ggml.tokens", raw.data(), raw.size());
     }
 
@@ -676,7 +775,7 @@ static void check_qwen4exp_mtp_reject_mismatch(const size_t seed, const float st
         if (mismatch == 2) {
             target->hparams.n_embd -= 1;
         }
-        if (std::string(err.what()).find(mismatch == 0 ? "vocab" : "hidden size") != std::string::npos ||
+        if (std::string(err.what()).find(mismatch == 0 || mismatch == 3 ? "vocab" : "hidden size") != std::string::npos ||
             (mismatch == 1 && std::string(err.what()).find("architecture") != std::string::npos)) {
             return;
         }
@@ -978,6 +1077,8 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
     if (arch_matches(arch_filter, LLM_ARCH_QWEN4EXP)) {
         check_qwen4exp_mtp_nextn_count(seed, stdev);
         LOG_INF("qwen4exp MTP rejects two NextN layers (block counts 1, 2, 4): OK\n");
+        check_qwen4exp_mtp_bad_metadata(seed, stdev);
+        LOG_INF("qwen4exp MTP rejects invalid block count, recurrent NextN, expert/head/FFN dimensions, rope scaling and HC width: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, false);
         LOG_INF("qwen4exp self-contained MTP verification batch: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, true);
@@ -986,6 +1087,8 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
         LOG_INF("qwen4exp shared MTP rejects mismatched vocabulary: OK\n");
         check_qwen4exp_mtp_reject_mismatch(seed, stdev, 0);
         LOG_INF("qwen4exp MTP rejects mismatched vocabulary: OK\n");
+        check_qwen4exp_mtp_reject_mismatch(seed, stdev, 3);
+        LOG_INF("qwen4exp MTP rejects mismatched token ID 2: OK\n");
         check_qwen4exp_mtp_reject_mismatch(seed, stdev, 1);
         LOG_INF("qwen4exp MTP rejects mismatched architecture: OK\n");
         check_qwen4exp_mtp_reject_mismatch(seed, stdev, 2);
@@ -1183,6 +1286,7 @@ int main(int argc, char ** argv) {
     size_t seed = rd();
     float stdev = 0.1f;
     std::string out;
+    std::string mtp_fixtures;
     const char * target_backend = nullptr;
 
     int verbosity = LOG_LEVEL_ERROR;
@@ -1238,6 +1342,13 @@ int main(int argc, char ** argv) {
                 usage(argv);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--mtp-fixtures") == 0) {
+            if (i + 1 < argc) {
+                mtp_fixtures = argv[++i];
+            } else {
+                usage(argv);
+                return 1;
+            }
         } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--backend") == 0) {
             if (i + 1 < argc) {
                 const char * backend_name = argv[++i];
@@ -1264,6 +1375,9 @@ int main(int argc, char ** argv) {
     LOG_INF("%s: using seed %zu, stdev %f\n", __func__, seed, stdev);
 
     try {
+        if (!mtp_fixtures.empty()) {
+            return save_qwen4exp_mtp_invalid_fixtures(mtp_fixtures, seed, stdev);
+        }
         if (!out.empty()) {
             return save_models(arch_filter, seed, stdev, verbosity, out);
         }
