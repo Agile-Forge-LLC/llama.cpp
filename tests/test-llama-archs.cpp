@@ -738,6 +738,23 @@ static int save_qwen4exp_mtp_invalid_fixtures(const std::string & dir, size_t se
     target_saver.add_tensors_from_model();
     target_saver.save(dir + "/qwen4exp-target.gguf");
 
+    for (int variant = 0; variant < 2; ++variant) {
+        gguf_context_ptr grouped_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
+        gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_count", 8);
+        if (variant == 1) {
+            gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_group_count", 4);
+            gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_group_used_count", 1);
+        }
+        llama_model_ptr grouped(llama_model_init_from_user(grouped_ctx.get(), set_tensor_data, &tensor_params, model_params));
+        if (!grouped) {
+            throw std::runtime_error("failed to generate grouped qwen4exp target fixture");
+        }
+        llama_model_saver saver(grouped.get());
+        saver.add_kv_from_model();
+        saver.add_tensors_from_model();
+        saver.save(dir + (variant == 0 ? "/qwen4exp-target-expert-groups.gguf" : "/qwen4exp-target-group-used.gguf"));
+    }
+
     gguf_context_ptr draft_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
     llama_model_ptr draft(llama_model_init_from_user(draft_ctx.get(), set_tensor_data, &tensor_params, model_params));
     if (!draft) {
@@ -756,8 +773,19 @@ static int save_qwen4exp_mtp_invalid_fixtures(const std::string & dir, size_t se
         const std::string name = n_layer_all == 0 ? "block-zero" : n_layer_all == 3 ? "nextn-recurrent" : "block-oversize";
         saver.save(dir + "/qwen4exp-" + name + ".gguf");
     }
-    for (int variant = 0; variant < 5; ++variant) {
-        llama_model_saver saver(draft.get());
+    for (int variant = 0; variant < 7; ++variant) {
+        llama_model_ptr grouped_draft;
+        if (variant >= 5) {
+            gguf_context_ptr grouped_ctx = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+            gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_count", 8);
+            gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_group_count", variant == 5 ? 2 : 4);
+            gguf_set_val_u32(grouped_ctx.get(), "qwen4exp.expert_group_used_count", variant == 5 ? 1 : 2);
+            grouped_draft.reset(llama_model_init_from_user(grouped_ctx.get(), set_tensor_data, &tensor_params, model_params));
+            if (!grouped_draft) {
+                throw std::runtime_error("failed to generate grouped qwen4exp MTP draft fixture");
+            }
+        }
+        llama_model_saver saver(grouped_draft ? grouped_draft.get() : draft.get());
         saver.add_kv_from_model();
         saver.add_tensors_from_model();
         const uint8_t recurrent[] = { 1, 0, 0 };
@@ -786,6 +814,12 @@ static int save_qwen4exp_mtp_invalid_fixtures(const std::string & dir, size_t se
                 name = "norm-eps";
                 gguf_set_val_f32(saver.gguf_ctx, "qwen4exp.attention.layer_norm_rms_epsilon", 1e-4f);
                 break;
+            case 5:
+                name = "expert-groups";
+                break;
+            case 6:
+                name = "group-used";
+                break;
         }
         saver.save(dir + "/qwen4exp-" + name + ".gguf");
     }
@@ -798,18 +832,34 @@ static void check_qwen4exp_mtp_hparams_mismatch(const size_t seed, const float s
     ggml_backend_dev_t devices[] = { nullptr };
     model_params.devices = devices;
     model_params.load_mtp = true;
-    gguf_context_ptr target_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
-    llama_model_ptr target(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
-    if (!target) {
-        throw std::runtime_error("failed to create qwen4exp target for hparam checks");
-    }
-
-    for (int variant = 0; variant < 3; ++variant) {
+    for (int variant = 0; variant < 5; ++variant) {
+        gguf_context_ptr target_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true);
         gguf_context_ptr draft_gguf = get_gguf_ctx(LLM_ARCH_QWEN4EXP, true, 1);
+        if (variant >= 3) {
+            gguf_set_val_u32(target_gguf.get(), "qwen4exp.expert_count", 8);
+            gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_count", 8);
+        }
+        if (variant == 4) {
+            gguf_set_val_u32(target_gguf.get(), "qwen4exp.expert_group_count", 4);
+            gguf_set_val_u32(target_gguf.get(), "qwen4exp.expert_group_used_count", 1);
+        }
+        llama_model_ptr target(llama_model_init_from_user(target_gguf.get(), set_tensor_data, &tensor_params, model_params));
+        if (!target) {
+            throw std::runtime_error("failed to create qwen4exp target for hparam checks");
+        }
+        if (variant == 4) {
+            gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_count", 4);
+            gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_used_count", 1);
+            llama_model_ptr matching(llama_model_init_from_user(draft_gguf.get(), set_tensor_data, &tensor_params, model_params));
+            if (!matching) {
+                throw std::runtime_error("failed to load matching grouped MTP draft");
+            }
+            common_speculative_require_mtp_compatible(target.get(), matching.get());
+        }
         const char * field = nullptr;
         switch (variant) {
             case 0:
-                field = "rope_freq_base";
+                field = "rope_freq_base_train";
                 gguf_set_val_f32(draft_gguf.get(), "qwen4exp.rope.freq_base", 25000.0f);
                 break;
             case 1:
@@ -819,6 +869,16 @@ static void check_qwen4exp_mtp_hparams_mismatch(const size_t seed, const float s
             case 2:
                 field = "f_norm_rms_eps";
                 gguf_set_val_f32(draft_gguf.get(), "qwen4exp.attention.layer_norm_rms_epsilon", 1e-4f);
+                break;
+            case 3:
+                field = "n_expert_groups";
+                gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_count", 2);
+                gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_used_count", 1);
+                break;
+            case 4:
+                field = "n_group_used";
+                gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_count", 4);
+                gguf_set_val_u32(draft_gguf.get(), "qwen4exp.expert_group_used_count", 2);
                 break;
         }
         llama_model_ptr draft(llama_model_init_from_user(draft_gguf.get(), set_tensor_data, &tensor_params, model_params));
@@ -1292,7 +1352,7 @@ static int test_backends(const std::string & arch_filter, const size_t seed, con
         check_qwen4exp_mtp_bad_metadata(seed, stdev);
         LOG_INF("qwen4exp MTP rejects invalid block count, recurrent NextN, expert/head/FFN dimensions, rope scaling, odd rope dimensions, per-layer expert widths and HC width: OK\n");
         check_qwen4exp_mtp_hparams_mismatch(seed, stdev);
-        LOG_INF("qwen4exp MTP rejects target hparam mismatches (rope base, expert count, norm epsilon): OK (3 fields)\n");
+        LOG_INF("qwen4exp MTP rejects target hparam mismatches (rope base, expert count, norm epsilon, expert groups, group used): OK (5 fields)\n");
         check_qwen4exp_mtp_batch(seed, stdev, false);
         LOG_INF("qwen4exp self-contained MTP verification batch: OK\n");
         check_qwen4exp_mtp_batch(seed, stdev, true);

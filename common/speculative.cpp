@@ -157,48 +157,197 @@ void common_speculative_require_mtp_compatible(const llama_model * model_tgt, co
 
     const auto & dft = model_dft->hparams;
     const auto & tgt = model_tgt->hparams;
+    // Classify new llama_hparams members here before changing this size guard.
+    static_assert(sizeof(llama_hparams) == 36096, "classify new MTP hparams fields as compared or allowlisted");
     auto require_equal = [](const char * name, auto draft_value, auto target_value) {
         if (draft_value != target_value) {
             throw std::runtime_error(std::string("QWEN4EXP MTP draft and target mismatch: ") + name);
         }
     };
 
-    require_equal("n_embd",                  dft.n_embd,                  tgt.n_embd);
-    require_equal("n_embd_out",              dft.n_embd_out(),            tgt.n_embd_out());
-    require_equal("n_embd_head_k",           dft.n_embd_head_k(),         tgt.n_embd_head_k());
-    require_equal("n_embd_head_v",           dft.n_embd_head_v(),         tgt.n_embd_head_v());
-    require_equal("n_rot",                   dft.n_rot(),                 tgt.n_rot());
-    require_equal("rope_sections",           dft.rope_sections,          tgt.rope_sections);
-    require_equal("rope_type",               dft.rope_type,              tgt.rope_type);
-    require_equal("rope_scaling_type",       dft.rope_scaling_type_train, tgt.rope_scaling_type_train);
-    require_equal("rope_freq_base",          dft.rope_freq_base_train,   tgt.rope_freq_base_train);
-    require_equal("rope_freq_scale",         dft.rope_freq_scale_train,  tgt.rope_freq_scale_train);
-    require_equal("rope_attn_factor",        dft.rope_attn_factor,       tgt.rope_attn_factor);
-    require_equal("rope_yarn_log_mul",       dft.rope_yarn_log_mul,      tgt.rope_yarn_log_mul);
-    require_equal("rope_finetuned",          dft.rope_finetuned,         tgt.rope_finetuned);
-    require_equal("n_ctx_orig_yarn",         dft.n_ctx_orig_yarn,        tgt.n_ctx_orig_yarn);
-    require_equal("yarn_ext_factor",         dft.yarn_ext_factor,        tgt.yarn_ext_factor);
-    require_equal("yarn_attn_factor",        dft.yarn_attn_factor,       tgt.yarn_attn_factor);
-    require_equal("yarn_beta_fast",          dft.yarn_beta_fast,         tgt.yarn_beta_fast);
-    require_equal("yarn_beta_slow",          dft.yarn_beta_slow,         tgt.yarn_beta_slow);
-    require_equal("n_expert",                dft.n_expert,              tgt.n_expert);
-    require_equal("n_ff_shexp",              dft.n_ff_shexp,            tgt.n_ff_shexp);
-    require_equal("expert_weights_scale",    dft.expert_weights_scale,  tgt.expert_weights_scale);
-    require_equal("dsv4_hc_mult",            dft.dsv4_hc_mult,          tgt.dsv4_hc_mult);
-    require_equal("hc_low_rank",             dft.hc_low_rank,           tgt.hc_low_rank);
-    require_equal("f_norm_rms_eps",          dft.f_norm_rms_eps,        tgt.f_norm_rms_eps);
-    require_equal("f_attention_scale",       dft.f_attention_scale,     tgt.f_attention_scale);
+    // Allowlist: no_alloc is a caller load option, not file metadata.
+    // n_layer_all and n_layer_nextn include the draft's extra predictor block.
+    // n_embd_per_layer is the target's trunk-only PLE embedding width.
+    // ple_ngram_size, ple_heads_per_ngram, ple_conv_kernel, ple_n_heads and ple_head_dim size trunk-only PLE state.
+    // ple_eos_token_id and ple_image_token_id identify trunk-only PLE input tokens.
+    // is_ple_impl, ple_layer_multipliers, ple_head_offsets and ple_head_vocab_sizes describe trunk-only PLE layers and hashes.
+    // rope_pattern, is_swa_impl, is_recr_impl, is_indexer_full_impl and dsv4_compress_ratios describe trunk layer patterns; the NextN block runs dense attention.
+    // Per-layer array entries outside the mapped NextN and target trunk layers do not run in this attachment.
+#define MTP_EQUAL(field) require_equal(#field, dft.field, tgt.field)
+    MTP_EQUAL(vocab_only);
+    MTP_EQUAL(rope_finetuned);
+    MTP_EQUAL(use_par_res);
+    MTP_EQUAL(swin_norm);
+    MTP_EQUAL(norm_before_residual);
+    MTP_EQUAL(norm_before_fc);
+    MTP_EQUAL(n_ctx_train);
+    MTP_EQUAL(n_embd);
+    MTP_EQUAL(router_layer);
+    MTP_EQUAL(n_expert);
+    MTP_EQUAL(n_rel_attn_bkts);
+    MTP_EQUAL(n_layer_kv_from_start);
+    MTP_EQUAL(n_embd_head_k_full);
+    MTP_EQUAL(n_embd_head_v_full);
+    MTP_EQUAL(n_embd_head_k_swa);
+    MTP_EQUAL(n_embd_head_v_swa);
+    MTP_EQUAL(n_rot_full);
+    MTP_EQUAL(n_rot_swa);
+    MTP_EQUAL(n_embd_head_k_mla_impl);
+    MTP_EQUAL(n_embd_head_v_mla_impl);
+    require_equal("posnet.n_embd",  dft.posnet.n_embd,  tgt.posnet.n_embd);
+    require_equal("posnet.n_layer", dft.posnet.n_layer, tgt.posnet.n_layer);
+    require_equal("convnext.n_embd",  dft.convnext.n_embd,  tgt.convnext.n_embd);
+    require_equal("convnext.n_layer", dft.convnext.n_layer, tgt.convnext.n_layer);
+    MTP_EQUAL(n_shortconv_l_cache);
+    MTP_EQUAL(n_layer_dense_lead);
+    MTP_EQUAL(n_lora_q);
+    MTP_EQUAL(n_lora_kv);
+    MTP_EQUAL(n_ff_shexp);
+    MTP_EQUAL(n_ff_chexp);
+    MTP_EQUAL(n_expert_shared);
+    MTP_EQUAL(n_norm_groups);
+    MTP_EQUAL(n_expert_groups);
+    MTP_EQUAL(n_group_used);
+    MTP_EQUAL(n_group_experts);
+    MTP_EQUAL(n_lora_kv_swa);
+    MTP_EQUAL(n_embd_head_k_mla_swa);
+    MTP_EQUAL(n_embd_head_v_mla_swa);
+    MTP_EQUAL(expert_group_scale);
+    MTP_EQUAL(expert_weights_scale);
+    MTP_EQUAL(expert_weights_norm);
+    MTP_EQUAL(expert_gating_func);
+    MTP_EQUAL(moe_every_n_layers);
+    MTP_EQUAL(moe_latent_size);
+    MTP_EQUAL(f_norm_eps);
+    MTP_EQUAL(f_norm_rms_eps);
+    MTP_EQUAL(f_norm_group_eps);
+    MTP_EQUAL(f_attn_logit_softcapping);
+    MTP_EQUAL(f_router_logit_softcapping);
+    MTP_EQUAL(f_final_logit_softcapping);
+    MTP_EQUAL(rescale_every_n_layers);
+    MTP_EQUAL(time_mix_extra_dim);
+    MTP_EQUAL(time_decay_extra_dim);
+    MTP_EQUAL(wkv_head_size);
+    MTP_EQUAL(token_shift_count);
+    MTP_EQUAL(n_lora_decay);
+    MTP_EQUAL(n_lora_iclr);
+    MTP_EQUAL(n_lora_value_res_mix);
+    MTP_EQUAL(n_lora_gate);
+    MTP_EQUAL(rope_attn_factor);
+    MTP_EQUAL(rope_freq_base_train);
+    MTP_EQUAL(rope_freq_base_train_swa);
+    MTP_EQUAL(rope_freq_scale_train);
+    MTP_EQUAL(rope_freq_scale_train_swa);
+    MTP_EQUAL(rope_scaling_alpha);
+    MTP_EQUAL(n_ctx_orig_yarn);
+    MTP_EQUAL(rope_yarn_log_mul);
+    MTP_EQUAL(yarn_ext_factor);
+    MTP_EQUAL(yarn_attn_factor);
+    MTP_EQUAL(yarn_beta_fast);
+    MTP_EQUAL(yarn_beta_slow);
+    MTP_EQUAL(rope_sections);
+    MTP_EQUAL(swa_type);
+    MTP_EQUAL(n_swa);
+    MTP_EQUAL(non_causal_type);
+    MTP_EQUAL(ssm_d_conv);
+    MTP_EQUAL(ssm_d_inner);
+    MTP_EQUAL(ssm_d_state);
+    MTP_EQUAL(ssm_dt_rank);
+    MTP_EQUAL(ssm_n_group);
+    MTP_EQUAL(n_embd_head_la);
+    MTP_EQUAL(n_embd_head_kda);
+    MTP_EQUAL(kda_safe_gate);
+    MTP_EQUAL(n_expert_latent);
+    MTP_EQUAL(attn_res_block_size);
+    MTP_EQUAL(kda_gate_lower_bound);
+    MTP_EQUAL(situ_beta);
+    MTP_EQUAL(situ_linear_beta);
+    MTP_EQUAL(n_hrm_layers_per_stack);
+    MTP_EQUAL(n_hrm_h_cycles);
+    MTP_EQUAL(n_hrm_l_cycles);
+    MTP_EQUAL(hrm_prefix_lm);
+    MTP_EQUAL(ssm_dt_b_c_rms);
+    MTP_EQUAL(f_clamp_kqv);
+    MTP_EQUAL(f_max_alibi_bias);
+    MTP_EQUAL(f_logit_scale);
+    MTP_EQUAL(f_residual_scale);
+    MTP_EQUAL(f_embedding_scale);
+    MTP_EQUAL(f_attention_scale);
+    MTP_EQUAL(f_attn_out_scale);
+    MTP_EQUAL(attn_temp_length);
+    MTP_EQUAL(f_attn_value_scale);
+    MTP_EQUAL(causal_attn);
+    MTP_EQUAL(use_alibi);
+    MTP_EQUAL(attn_soft_cap);
+    MTP_EQUAL(use_kq_norm);
+    MTP_EQUAL(n_cls_out);
+    MTP_EQUAL(n_embd_inp_impl);
+    MTP_EQUAL(n_embd_inp_enc_impl);
+    MTP_EQUAL(n_embd_out_impl);
+    MTP_EQUAL(dflash_block_size);
+    MTP_EQUAL(dflash_conv_kernel_size);
+    MTP_EQUAL(dflash_conv_group_size);
+    MTP_EQUAL(dflash_selector_rank);
+    MTP_EQUAL(dflash_selector_top_k);
+    MTP_EQUAL(n_moe_layer_step);
+    MTP_EQUAL(n_no_rope_layer_step);
+    MTP_EQUAL(n_attn_temp_floor_scale);
+    MTP_EQUAL(f_attn_temp_scale);
+    MTP_EQUAL(f_attn_temp_offset);
+    MTP_EQUAL(n_altup);
+    MTP_EQUAL(i_altup_act);
+    MTP_EQUAL(laurel_rank);
+    MTP_EQUAL(n_embd_altup);
+    MTP_EQUAL(dense_2_feat_in);
+    MTP_EQUAL(dense_2_feat_out);
+    MTP_EQUAL(dense_3_feat_in);
+    MTP_EQUAL(dense_3_feat_out);
+    MTP_EQUAL(indexer_n_head);
+    MTP_EQUAL(indexer_head_size);
+    MTP_EQUAL(indexer_top_k);
+    MTP_EQUAL(indexer_kpool);
+    MTP_EQUAL(indexer_kpool_select_tail);
+    MTP_EQUAL(indexer_kpool_row);
+    MTP_EQUAL(indexer_kpool_by_order);
+    MTP_EQUAL(indexer_block_size);
+    MTP_EQUAL(indexer_local_blocks);
+    MTP_EQUAL(dsv4_o_group_count);
+    MTP_EQUAL(dsv4_o_lora_rank);
+    MTP_EQUAL(dsv4_hc_mult);
+    MTP_EQUAL(dsv4_hc_sinkhorn_iters);
+    MTP_EQUAL(dsv4_hash_layer_count);
+    MTP_EQUAL(dsv4_compress_rope_base);
+    MTP_EQUAL(dsv4_hc_eps);
+    MTP_EQUAL(hc_low_rank);
+    MTP_EQUAL(hc_magnitude);
+    MTP_EQUAL(n_deepstack_layers);
+    MTP_EQUAL(dec_start_token_id);
+    MTP_EQUAL(dec_n_layer);
+    MTP_EQUAL(pooling_type);
+    MTP_EQUAL(pooling_type_cls);
+    MTP_EQUAL(rope_type);
+    MTP_EQUAL(rope_scaling_type_train);
+    MTP_EQUAL(llm_ffn_op);
 
     for (uint32_t il = 0; il < tgt.n_layer(); ++il) {
-        require_equal("n_head",        dft.n_head(),        tgt.n_head(il));
-        require_equal("n_head_kv",     dft.n_head_kv(),     tgt.n_head_kv(il));
-        require_equal("n_expert_used", dft.n_expert_used(), tgt.n_expert_used(il));
-        require_equal("n_ff_exp",      dft.n_ff_exp(),      tgt.n_ff_exp(il));
-        require_equal("n_ff",          dft.n_ff(),          tgt.n_ff(il));
-        require_equal("n_rot",         dft.n_rot(),         tgt.n_rot(il));
-        require_equal("n_embd_head_k", dft.n_embd_head_k(), tgt.n_embd_head_k(il));
-        require_equal("n_embd_head_v", dft.n_embd_head_v(), tgt.n_embd_head_v(il));
+        const uint32_t nextn = dft.n_layer();
+#define MTP_LAYER_EQUAL(field) require_equal(#field, dft.field[nextn], tgt.field[il])
+        MTP_LAYER_EQUAL(n_head_arr);
+        MTP_LAYER_EQUAL(n_head_kv_arr);
+        MTP_LAYER_EQUAL(n_ff_arr);
+        MTP_LAYER_EQUAL(n_ff_exp_arr);
+        MTP_LAYER_EQUAL(n_expert_used_arr);
+        MTP_LAYER_EQUAL(xielu_alpha_n);
+        MTP_LAYER_EQUAL(xielu_alpha_p);
+        MTP_LAYER_EQUAL(xielu_beta);
+        MTP_LAYER_EQUAL(xielu_eps);
+        MTP_LAYER_EQUAL(deepstack_mapping_arr);
+        MTP_LAYER_EQUAL(swiglu_clamp_exp);
+        MTP_LAYER_EQUAL(swiglu_clamp_shexp);
+#undef MTP_LAYER_EQUAL
     }
+#undef MTP_EQUAL
+    require_equal("n_embd_out", dft.n_embd_out(), tgt.n_embd_out());
 }
 
 using common_speculative_draft_params_vec = std::vector<common_speculative_draft_params>;
