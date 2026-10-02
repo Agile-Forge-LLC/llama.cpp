@@ -53,12 +53,22 @@ endif()
 
 set(TARGET llama-common)
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_custom_target(check-mtp-hparams
-    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
-    DEPENDS ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
-    VERBATIM
-)
+option(LLAMA_MTP_HPARAMS_CHECK "llama: check MTP hyperparameter field classification with clang++" ON)
+if (LLAMA_MTP_HPARAMS_CHECK)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    find_program(LLAMA_MTP_CLANGXX NAMES clang++ clang++-21)
+    if (NOT LLAMA_MTP_CLANGXX)
+        message(FATAL_ERROR "LLAMA_MTP_HPARAMS_CHECK requires clang++. Install clang or set -DLLAMA_MTP_HPARAMS_CHECK=OFF")
+    endif()
+    add_custom_target(check-mtp-hparams
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
+            --clang ${LLAMA_MTP_CLANGXX}
+            --include-dirs "$<JOIN:$<TARGET_PROPERTY:llama-common,INCLUDE_DIRECTORIES>,|>"
+            --defines "$<JOIN:$<TARGET_PROPERTY:llama-common,COMPILE_DEFINITIONS>,|>"
+        DEPENDS ${PROJECT_SOURCE_DIR}/scripts/check-mtp-hparams.py ${PROJECT_SOURCE_DIR}/src/llama-hparams.h
+        VERBATIM
+    )
+endif()
 
 include(parsers/sources.cmake)
 
@@ -134,7 +144,9 @@ add_library(${TARGET}
     jinja/caps.h
     )
 
-add_dependencies(${TARGET} check-mtp-hparams)
+if (LLAMA_MTP_HPARAMS_CHECK)
+    add_dependencies(${TARGET} check-mtp-hparams)
+endif()
 
 set_target_properties(${TARGET} PROPERTIES
     VERSION ${LLAMA_VERSION_BASE}
